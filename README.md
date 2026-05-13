@@ -125,7 +125,7 @@ fixpix ./input.png --pixel-width 8
 | `--url-timeout-ms <n>` | positive integer | `30000` | Timeout for URL input downloads, in milliseconds. |
 | `--url-max-bytes <n>` | positive integer | `52428800` | Maximum URL input size in bytes. Checked against `Content-Length` when available and while reading the response. |
 | `--url-content-types <list>` | comma-separated MIME list | `image/*,application/octet-stream` | Allowed URL response content types. Exact types and wildcards such as `image/*` are supported. |
-| `--debug-out <path>` | path | none | Writes a combined debug sheet with source preview, edge preview, line overlays, grid overlay, final image, and palette. |
+| `--debug-out <path>` | path | none | Writes a combined debug sheet with source preview, edge preview, line overlays, grid overlay, magnified final image, natural-size unscaled image, and palette. |
 | `--debug-scale <n>` | positive integer | `6` | Scale used for debug sheet previews. |
 | `--unscaled-out <path>` | path | none | Writes the unscaled cleaned sprite before final output scaling. |
 | `--palette-out <path>` | path | none | Writes a palette swatch image. |

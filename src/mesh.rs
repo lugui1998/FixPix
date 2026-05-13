@@ -1259,6 +1259,7 @@ pub fn create_debug_sheet(
         mesh,
         preview_scale,
     );
+    let unscaled_preview = unscaled.clone();
     let mut final_preview = scale_nearest(unscaled, debug_display_multiplier);
 
     let final_preview_scale =
@@ -1271,7 +1272,7 @@ pub fn create_debug_sheet(
 
     compose_debug_rows(&[
         &[original_preview, canny_preview, hough_preview, grid_preview],
-        &[final_preview, palette_preview],
+        &[final_preview, unscaled_preview, palette_preview],
     ])
 }
 
@@ -2103,6 +2104,26 @@ mod tests {
 
         assert_eq!(debug.width, 68);
         assert_eq!(debug.height, 40);
+    }
+
+    #[test]
+    fn debug_sheet_includes_unscaled_output_at_natural_size() {
+        let output_color = [17, 33, 51, 255];
+        let debug = create_debug_sheet(
+            &tiny_original(),
+            &RawImage::new(1, 1, output_color.to_vec()),
+            &tiny_mesh(),
+            &[[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]],
+            1,
+            1.0,
+        );
+
+        let output_pixels = debug
+            .data
+            .chunks_exact(4)
+            .filter(|pixel| *pixel == output_color)
+            .count();
+        assert_eq!(output_pixels, 5);
     }
 
     #[test]

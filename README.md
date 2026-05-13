@@ -285,3 +285,8 @@ $env:VISUALS_FIXTURES="fish,tiles"
 $env:VISUALS_MAX_PROCESSES="8"
 cargo run --release --bin generate-visual-artifacts
 ```
+
+## License
+
+FixPix is licensed under the GNU General Public License v3.0 only. See
+`LICENSE` for the full license text.

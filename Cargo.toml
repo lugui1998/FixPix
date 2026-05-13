@@ -2,7 +2,7 @@
 name = "fixpix"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-only"
 description = "CPU-optimized native CLI for cleaning pixel-art-like images."
 
 [[bin]]

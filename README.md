@@ -3,53 +3,11 @@
 CPU-only native CLI for converting noisy pixel-art-style images into clean
 pixel-resolution sprites.
 
-This is the Rust implementation of FixPix. It is designed for fast
-command-line use, multi-core CPU processing, and standalone release binaries for
-Windows and Linux.
-
-## Features
-
-- Converts local PNG, JPEG, and WebP inputs.
-- Converts entire directories recursively.
-- Supports `http://` and `https://` image inputs with download guardrails.
-- Detects source pixel size with projection, Hough, or hybrid detection.
-- Refines pixel grids with CPU-based mesh and local-edge analysis.
-- Supports automatic, fixed, sampled, and full-color palette modes.
-- Can generate unscaled sprites, palette swatches, and debug sheets.
-- Uses one global Rayon CPU thread pool for batch and per-image work.
-- Builds to a single executable. No OpenCV, libvips, system OpenSSL, or sidecar
-  runtime files are required.
-
-## Install From Source
-
-Requirements:
-
-- Rust stable toolchain
-- Cargo
-
-Build the release CLI:
-
-```bash
-cargo build --release --bin fixpix
-```
-
-The Windows binary is written to:
-
-```text
-target/release/fixpix.exe
-```
-
-The Linux binary is written to:
-
-```text
-target/release/fixpix
-```
-
 ## Usage
 
 Basic conversion:
 
-```bash
+```bashP
 fixpix ./input.png --output ./output.png
 ```
 
@@ -65,10 +23,10 @@ On Windows:
 .\target\release\fixpix.exe .\input.png --output .\output.png
 ```
 
+
 ## Input And Output Rules
 
-- Input can be a local file path, local directory, or `http://` / `https://`
-  URL.
+- Input can be a local file path, local directory, or a URL.
 - Input can be positional or passed with `--input`.
 - Output can be positional or passed with `--output`.
 - File input defaults to `<input-name>_fixpix.<format>` beside the input.
@@ -78,7 +36,6 @@ On Windows:
   output directory.
 - URL input defaults to `<url-file-name>.<format>` in the current directory.
 - If a file output path has no extension, it is treated as an output directory.
-- The CLI always writes files.
 
 ## Examples
 
@@ -88,12 +45,10 @@ Convert one image with defaults:
 fixpix ./tests/sources/dragon_coffee_2.png
 ```
 
-Force a 32-color PNG:
+Limit the color palette to a max of 8 colors:
 
 ```bash
-fixpix ./tests/sources/dragon_coffee_2.png \
-  --output ./art/dragon.png \
-  --colors 32
+fixpix ./tests/sources/dragon_coffee_2.png --colors 8
 ```
 
 Write debug artifacts:
@@ -112,7 +67,6 @@ Downscale a high-resolution image into a 32x32 sprite:
 ```bash
 fixpix ./tests/sources/armor2.png ./art/armor2.png \
   --downscale 32x32 \
-  --downscale-sample-from original \
   --colors auto \
   --scale 16
 ```
@@ -237,8 +191,6 @@ installed is the recommended path.
 From WSL:
 
 ```bash
-cd /mnt/d/Projetos/FixPix
-cargo test
 cargo build --release --bin fixpix
 ```
 
@@ -290,3 +242,8 @@ cargo run --release --bin generate-visual-artifacts
 
 FixPix is licensed under the GNU General Public License v3.0 only. See
 `LICENSE` for the full license text.
+
+### Disclosure
+
+AI tools where used in the process of creating this project.
+This isn't however a _vibecoded_ project. Parts that include AI generated code are reviewed by me, the author of the project.

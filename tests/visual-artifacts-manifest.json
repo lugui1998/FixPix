@@ -1,0 +1,145 @@
+{
+  "defaultCategories": [
+    "default",
+    "text-clarity",
+    "transparency",
+    "transparent-32x32"
+  ],
+  "categories": [
+    {
+      "name": "default",
+      "description": "Default transform settings for every source fixture.",
+      "outputDir": "default",
+      "fixtures": "all",
+      "scenarios": [
+        {
+          "name": "default",
+          "options": {}
+        }
+      ]
+    },
+    {
+      "name": "text-clarity",
+      "description": "Default transform settings for fixtures with small text that should remain readable.",
+      "outputDir": "text-clarity",
+      "fixtures": [
+        "dragon_tavern_1.png",
+        "dragon_tavern_2.png",
+        "dragon_tavern_3.png"
+      ],
+      "scenarios": [
+        {
+          "name": "default",
+          "options": {}
+        }
+      ]
+    },
+    {
+      "name": "transparency",
+      "description": "Transparent-background cleanup for selected fixtures.",
+      "outputDir": "transparency",
+      "fixtures": [
+        "armor.png",
+        "armor2.png",
+        "ash.png",
+        "axe.png",
+        "blob.png",
+        "demon.png",
+        "fish.png",
+        "fish_2.png",
+        "pumpkin.png"
+      ],
+      "scenarios": [
+        {
+          "name": "transparent",
+          "options": {
+            "transparentBackground": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "transparent-32x32",
+      "aliases": [
+        "transparency-32x32"
+      ],
+      "description": "Transparent-background cleanup followed by 32x32 downscale.",
+      "outputDir": "transparent-32x32",
+      "fixtures": [
+        "armor2.png",
+        "armor3.png",
+        "armor4.png",
+        "armor5.png",
+        "armor6.png",
+        "axe.png"
+      ],
+      "scenarios": [
+        {
+          "name": "transparent-32x32",
+          "options": {
+            "transparentBackground": true,
+            "scale": 32,
+            "downscale": {
+              "width": 32,
+              "height": 32
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "detector",
+      "description": "Detector comparison for every source fixture.",
+      "outputDir": "detector",
+      "fixtures": "all",
+      "scenarios": [
+        {
+          "name": "hough",
+          "options": {
+            "pixelWidthDetector": "hough"
+          }
+        },
+        {
+          "name": "hybrid",
+          "options": {
+            "pixelWidthDetector": "hybrid"
+          }
+        },
+        {
+          "name": "projection",
+          "options": {
+            "pixelWidthDetector": "projection"
+          }
+        }
+      ]
+    },
+    {
+      "name": "palette",
+      "description": "Palette merge threshold comparison for every source fixture.",
+      "outputDir": "palette",
+      "fixtures": "all",
+      "scenarios": [
+        {
+          "name": "default-threshold",
+          "options": {
+            "colors": "auto"
+          }
+        },
+        {
+          "name": "threshold-0",
+          "options": {
+            "colors": "auto",
+            "paletteMergeThreshold": 0
+          }
+        },
+        {
+          "name": "threshold-16",
+          "options": {
+            "colors": "auto",
+            "paletteMergeThreshold": 16
+          }
+        }
+      ]
+    }
+  ]
+}

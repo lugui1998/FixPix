@@ -1,0 +1,21 @@
+/target/
+
+# Local benchmark and generated output
+/bench-output/
+/output/
+/artifacts/
+/compare-output/
+
+# Local environment/config overrides
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

@@ -114,7 +114,7 @@ fixpix ./input.png --pixel-width 8
 | `--auto-scale-height <n>` | positive integer | none | Target height for automatic output scaling. Must be used with `--auto-scale-width`. |
 | `--downscale <n\|WxH>` | positive integer or size | none | Removes detected boundary background, crops transparent padding, and fits the source into the requested size before pixel processing. A single number means square size. |
 | `--downscale-sample-from <pixelated\|original>` | enum | `pixelated` | `pixelated` keeps the resized downscale result. `original` samples dominant colors from the cleaned original image. |
-| `-t, --transparent` | flag | `false` | Makes detected background cells transparent after sampling. |
+| `-t, --transparent` | flag | `false` | Masks detected boundary-connected background before sampling and removes adjacent sampled background fringes. |
 | `--crop` | flag | `false` | Crops transparent padding from the final unscaled sprite. |
 | `--crop-size <n\|WxH>` | positive integer or size | none | Crops transparent padding and centers content in the requested canvas size. A single number means square size. |
 | `-w, --pixel-width <n>` | positive integer | automatic detection | Forces a known source pixel width. |

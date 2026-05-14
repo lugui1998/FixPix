@@ -2,8 +2,9 @@ use rayon::prelude::*;
 
 use crate::core::{PixelWidthDetector, PixelWidthSource};
 use crate::image::{
-    ALPHA_THRESHOLD, RawImage, choose_closest_integer_scale, limit_scale_for_max_dimension,
-    scale_nearest,
+    ALPHA_THRESHOLD, BackgroundMask, RawImage, apply_background_mask, boundary_background_color,
+    boundary_background_mask_with_color, choose_closest_integer_scale, color_distance_sq,
+    limit_scale_for_max_dimension, scale_nearest,
 };
 use crate::palette::sample_cell_color;
 
@@ -12,6 +13,12 @@ const MAX_DEBUG_SEGMENTS_PER_FAMILY: usize = 250;
 const DEBUG_PALETTE_MAX_SWATCH_SCALE: u32 = 64;
 const DEBUG_PALETTE_MAX_WIDTH_RATIO: f32 = 0.36;
 const DEBUG_PALETTE_MAX_HEIGHT_RATIO: f32 = 0.24;
+const DEBUG_GRID_COLOR: [u8; 4] = [255, 0, 0, 255];
+const DEBUG_UNWARPED_GRID_COLOR: [u8; 4] = [80, 200, 255, 255];
+const BACKGROUND_TRANSPARENT_COVERAGE: u8 = 153;
+const BACKGROUND_FRINGE_MIN_COVERAGE: u8 = 64;
+const SAMPLED_BACKGROUND_FRINGE_DISTANCE_LIMIT: i32 = 2500;
+const SAMPLED_BACKGROUND_FRINGE_PASSES: usize = 2;
 const LOCAL_EDGE_REFINEMENT_RADIUS_RATIO: f32 = 0.4;
 const LOCAL_EDGE_REFINEMENT_MAX_RADIUS: u32 = 14;
 const LOCAL_EDGE_REFINEMENT_GAP_PENALTY: f32 = 1.15;
@@ -272,38 +279,89 @@ pub fn sample_cells(
     sample_grid: u32,
     transparent_background: bool,
 ) -> RawImage {
+    let background = transparent_background
+        .then(|| boundary_background_color(image))
+        .flatten();
+    let background_mask =
+        background.map(|background| boundary_background_mask_with_color(image, &background));
+    let transparent_image;
+    let sampling_image = if let Some(mask) = &background_mask {
+        transparent_image = apply_background_mask(image, mask);
+        &transparent_image
+    } else {
+        image
+    };
     let width = mesh.lines_x.len().saturating_sub(1) as u32;
     let height = mesh.lines_y.len().saturating_sub(1) as u32;
-    let mut out = vec![0; width as usize * height as usize * 4];
-    out.par_chunks_exact_mut(4)
-        .enumerate()
-        .for_each(|(index, pixel)| {
+    let cells = (0..width as usize * height as usize)
+        .into_par_iter()
+        .map(|index| {
             let x = index as u32 % width;
             let y = index as u32 / width;
-            let mut color = if mesh.warp.is_some() {
-                sample_warped_cell_color(image, mesh, x as usize, y as usize, sample_grid)
+            let mut cell = if mesh.warp.is_some() {
+                sample_warped_cell(
+                    sampling_image,
+                    background_mask.as_ref(),
+                    mesh,
+                    x as usize,
+                    y as usize,
+                    sample_grid,
+                )
             } else {
-                let (x0, x1, y0, y1) = mesh_cell_bounds(mesh, x as usize, y as usize, image);
-                sample_cell_color(image, x0, x1, y0, y1, sample_grid)
+                let (x0, x1, y0, y1) =
+                    mesh_cell_bounds(mesh, x as usize, y as usize, sampling_image);
+                SampledCell {
+                    color: sample_cell_color(sampling_image, x0, x1, y0, y1, sample_grid),
+                    background_coverage: background_mask
+                        .as_ref()
+                        .map(|mask| background_coverage_for_bounds(mask, x0, x1, y0, y1))
+                        .unwrap_or(0),
+                }
             };
-            if transparent_background && color[3] < 160 {
-                color = [0, 0, 0, 0];
+            if transparent_background
+                && (cell.color[3] < 160
+                    || cell.background_coverage >= BACKGROUND_TRANSPARENT_COVERAGE)
+            {
+                cell.color = [0, 0, 0, 0];
             }
-            pixel.copy_from_slice(&color);
-        });
-    RawImage::new(width, height, out)
+            cell
+        })
+        .collect::<Vec<_>>();
+    let mut out = Vec::with_capacity(cells.len() * 4);
+    let mut coverages = Vec::with_capacity(cells.len());
+    for cell in cells {
+        out.extend_from_slice(&cell.color);
+        coverages.push(cell.background_coverage);
+    }
+    let mut sampled = RawImage::new(width, height, out);
+    if let Some(background) = background {
+        remove_sampled_background_fringe(&mut sampled, &coverages, &background);
+    }
+    sampled
 }
 
-fn sample_warped_cell_color(
+#[derive(Debug, Clone, Copy)]
+struct SampledCell {
+    color: [u8; 4],
+    background_coverage: u8,
+}
+
+fn sample_warped_cell(
     image: &RawImage,
+    background_mask: Option<&BackgroundMask>,
     mesh: &Mesh,
     cell_x: usize,
     cell_y: usize,
     sample_grid: u32,
-) -> [u8; 4] {
+) -> SampledCell {
     let Some(corners) = warped_cell_corners(mesh, cell_x, cell_y) else {
         let (x0, x1, y0, y1) = mesh_cell_bounds(mesh, cell_x, cell_y, image);
-        return sample_cell_color(image, x0, x1, y0, y1, sample_grid);
+        return SampledCell {
+            color: sample_cell_color(image, x0, x1, y0, y1, sample_grid),
+            background_coverage: background_mask
+                .map(|mask| background_coverage_for_bounds(mask, x0, x1, y0, y1))
+                .unwrap_or(0),
+        };
     };
 
     let subdivision = subdivided_warped_cell_grid(image, corners);
@@ -314,6 +372,7 @@ fn sample_warped_cell_color(
     let mut distances = [0.0f32; WARP_SAMPLE_COLOR_CAPACITY];
     let mut color_count = 0usize;
     let mut opaque_samples = 0u32;
+    let mut background_samples = 0u32;
     let mut total_samples = 0u32;
     let mut best_key = None;
     let mut best_count = 0u32;
@@ -333,6 +392,9 @@ fn sample_warped_cell_color(
                 .round()
                 .clamp(0.0, image.height.saturating_sub(1) as f32) as u32;
             total_samples += 1;
+            if background_mask.is_some_and(|mask| mask.is_background(x, y)) {
+                background_samples += 1;
+            }
             let sampled = image.pixel(x, y);
             if sampled[3] < ALPHA_THRESHOLD {
                 continue;
@@ -370,12 +432,85 @@ fn sample_warped_cell_color(
     }
 
     if total_samples == 0 || opaque_samples <= total_samples / 2 {
-        return [0, 0, 0, 0];
+        return SampledCell {
+            color: [0, 0, 0, 0],
+            background_coverage: coverage_to_u8(background_samples, total_samples),
+        };
     }
-    best_key
+    let color = best_key
         .map(unpack_rgb)
         .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
-        .unwrap_or([0, 0, 0, 0])
+        .unwrap_or([0, 0, 0, 0]);
+    SampledCell {
+        color,
+        background_coverage: coverage_to_u8(background_samples, total_samples),
+    }
+}
+
+fn background_coverage_for_bounds(mask: &BackgroundMask, x0: u32, x1: u32, y0: u32, y1: u32) -> u8 {
+    if x1 <= x0 || y1 <= y0 {
+        return 0;
+    }
+    let mut background = 0u32;
+    let mut total = 0u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            total += 1;
+            background += u32::from(mask.is_background(x, y));
+        }
+    }
+    coverage_to_u8(background, total)
+}
+
+fn coverage_to_u8(background: u32, total: u32) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    ((background * 255 + total / 2) / total).min(255) as u8
+}
+
+fn remove_sampled_background_fringe(
+    image: &mut RawImage,
+    background_coverages: &[u8],
+    background: &[u8; 4],
+) {
+    debug_assert_eq!(
+        background_coverages.len(),
+        image.width as usize * image.height as usize
+    );
+    for _ in 0..SAMPLED_BACKGROUND_FRINGE_PASSES {
+        let mut fringe = Vec::new();
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let index = (y * image.width + x) as usize;
+                let pixel = image.pixel(x, y);
+                if pixel[3] < ALPHA_THRESHOLD
+                    || background_coverages[index] < BACKGROUND_FRINGE_MIN_COVERAGE
+                    || color_distance_sq(&pixel, background)
+                        > SAMPLED_BACKGROUND_FRINGE_DISTANCE_LIMIT
+                    || !touches_transparent_output_neighbor(image, x, y)
+                {
+                    continue;
+                }
+                fringe.push((x, y));
+            }
+        }
+
+        if fringe.is_empty() {
+            break;
+        }
+
+        for (x, y) in fringe {
+            image.set_pixel(x, y, [0, 0, 0, 0]);
+        }
+    }
+}
+
+fn touches_transparent_output_neighbor(image: &RawImage, x: u32, y: u32) -> bool {
+    (x > 0 && image.pixel(x - 1, y)[3] < ALPHA_THRESHOLD)
+        || (y > 0 && image.pixel(x, y - 1)[3] < ALPHA_THRESHOLD)
+        || (x + 1 < image.width && image.pixel(x + 1, y)[3] < ALPHA_THRESHOLD)
+        || (y + 1 < image.height && image.pixel(x, y + 1)[3] < ALPHA_THRESHOLD)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1253,12 +1388,7 @@ pub fn create_debug_sheet(
         preview_scale,
     );
     let hough_preview = draw_anchor_overlay(&hough_preview, mesh, preview_scale);
-    let grid_preview = draw_grid_overlay(
-        &enlarged_detection_image,
-        &detection_image,
-        mesh,
-        preview_scale,
-    );
+    let grid_preview = draw_grid_overlay(&enlarged_detection_image, mesh, preview_scale);
     let unscaled_preview = unscaled.clone();
     let mut final_preview = scale_nearest(unscaled, debug_display_multiplier);
 
@@ -1760,12 +1890,7 @@ fn draw_anchor_point(image: &mut RawImage, x: u32, y: u32, color: [u8; 4]) {
     }
 }
 
-fn draw_grid_overlay(
-    base: &RawImage,
-    source: &RawImage,
-    mesh: &MeshResult,
-    preview_scale: u32,
-) -> RawImage {
+fn draw_grid_overlay(base: &RawImage, mesh: &MeshResult, preview_scale: u32) -> RawImage {
     let mut out = base.clone();
     let mesh_scale = mesh.scale_used.max(1);
     let out_width = out.width;
@@ -1775,40 +1900,13 @@ fn draw_grid_overlay(
         let row_count = mesh.mesh.lines_y.len().saturating_sub(1);
         for cell_y in 0..row_count {
             for cell_x in 0..column_count {
+                draw_unwarped_cell_grid_edges(&mut out, mesh, cell_x, cell_y, preview_scale);
+            }
+        }
+        for cell_y in 0..row_count {
+            for cell_x in 0..column_count {
                 if let Some(corners) = warped_cell_corners(&mesh.mesh, cell_x, cell_y) {
-                    draw_warped_subdivision_overlay(&mut out, source, corners, mesh, preview_scale);
-                    draw_warped_grid_edge(
-                        &mut out,
-                        corners.top_left,
-                        corners.top_right,
-                        mesh,
-                        preview_scale,
-                        [255, 0, 0, 255],
-                    );
-                    draw_warped_grid_edge(
-                        &mut out,
-                        corners.bottom_left,
-                        corners.bottom_right,
-                        mesh,
-                        preview_scale,
-                        [255, 0, 0, 255],
-                    );
-                    draw_warped_grid_edge(
-                        &mut out,
-                        corners.top_left,
-                        corners.bottom_left,
-                        mesh,
-                        preview_scale,
-                        [255, 0, 0, 255],
-                    );
-                    draw_warped_grid_edge(
-                        &mut out,
-                        corners.top_right,
-                        corners.bottom_right,
-                        mesh,
-                        preview_scale,
-                        [255, 0, 0, 255],
-                    );
+                    draw_warped_cell_grid_edges(&mut out, corners, mesh, preview_scale);
                 }
             }
         }
@@ -1822,7 +1920,7 @@ fn draw_grid_overlay(
                 out_width,
             );
             for y in 0..out.height {
-                out.set_pixel(scaled_x, y, [255, 0, 0, 255]);
+                out.set_pixel(scaled_x, y, DEBUG_GRID_COLOR);
             }
         }
         for y in &mesh.mesh.lines_y {
@@ -1834,90 +1932,90 @@ fn draw_grid_overlay(
                 out_height,
             );
             for x in 0..out.width {
-                out.set_pixel(x, scaled_y, [255, 0, 0, 255]);
+                out.set_pixel(x, scaled_y, DEBUG_GRID_COLOR);
             }
         }
     }
     out
 }
 
-fn draw_warped_subdivision_overlay(
+fn draw_unwarped_cell_grid_edges(
     image: &mut RawImage,
-    source: &RawImage,
+    mesh: &MeshResult,
+    cell_x: usize,
+    cell_y: usize,
+    preview_scale: u32,
+) {
+    let corners = unwarped_cell_corners(&mesh.mesh, cell_x, cell_y);
+    draw_cell_grid_edges(
+        image,
+        corners,
+        mesh,
+        preview_scale,
+        DEBUG_UNWARPED_GRID_COLOR,
+    );
+}
+
+fn draw_warped_cell_grid_edges(
+    image: &mut RawImage,
     corners: WarpedCellCorners,
     mesh: &MeshResult,
     preview_scale: u32,
 ) {
-    let subdivision = subdivided_warped_cell_grid(source, corners);
-    let points = subdivision.points;
-    let color = [0, 255, 80, 255];
-    let base_points = base_subdivision_points(corners);
-    draw_moved_warped_grid_edge(
-        image,
-        (points[0][1], base_points[0][1]),
-        (points[1][1], base_points[1][1]),
-        mesh,
-        preview_scale,
-        color,
-    );
-    draw_moved_warped_grid_edge(
-        image,
-        (points[1][1], base_points[1][1]),
-        (points[2][1], base_points[2][1]),
-        mesh,
-        preview_scale,
-        color,
-    );
-    draw_moved_warped_grid_edge(
-        image,
-        (points[1][0], base_points[1][0]),
-        (points[1][1], base_points[1][1]),
-        mesh,
-        preview_scale,
-        color,
-    );
-    draw_moved_warped_grid_edge(
-        image,
-        (points[1][1], base_points[1][1]),
-        (points[1][2], base_points[1][2]),
-        mesh,
-        preview_scale,
-        color,
-    );
-    for y in 0..3 {
-        for x in 0..3 {
-            if subdivision_point_moved(points[y][x], base_points[y][x]) {
-                draw_warped_grid_point(image, points[y][x], mesh, preview_scale);
-            }
-        }
+    draw_cell_grid_edges(image, corners, mesh, preview_scale, DEBUG_GRID_COLOR);
+}
+
+fn unwarped_cell_corners(mesh: &Mesh, cell_x: usize, cell_y: usize) -> WarpedCellCorners {
+    WarpedCellCorners {
+        top_left: (mesh.lines_x[cell_x] as f32, mesh.lines_y[cell_y] as f32),
+        top_right: (mesh.lines_x[cell_x + 1] as f32, mesh.lines_y[cell_y] as f32),
+        bottom_left: (mesh.lines_x[cell_x] as f32, mesh.lines_y[cell_y + 1] as f32),
+        bottom_right: (
+            mesh.lines_x[cell_x + 1] as f32,
+            mesh.lines_y[cell_y + 1] as f32,
+        ),
     }
 }
 
-fn base_subdivision_points(corners: WarpedCellCorners) -> [[(f32, f32); 3]; 3] {
-    let mut points = [[(0.0, 0.0); 3]; 3];
-    for (y, row) in points.iter_mut().enumerate() {
-        for (x, point) in row.iter_mut().enumerate() {
-            *point = bilinear_point(corners, x as f32 / 2.0, y as f32 / 2.0);
-        }
-    }
-    points
-}
-
-fn draw_moved_warped_grid_edge(
+fn draw_cell_grid_edges(
     image: &mut RawImage,
-    start: ((f32, f32), (f32, f32)),
-    end: ((f32, f32), (f32, f32)),
+    corners: WarpedCellCorners,
     mesh: &MeshResult,
     preview_scale: u32,
     color: [u8; 4],
 ) {
-    if subdivision_point_moved(start.0, start.1) || subdivision_point_moved(end.0, end.1) {
-        draw_warped_grid_edge(image, start.0, end.0, mesh, preview_scale, color);
-    }
-}
-
-fn subdivision_point_moved(point: (f32, f32), base: (f32, f32)) -> bool {
-    (point.0 - base.0).abs().max((point.1 - base.1).abs()) >= 0.35
+    draw_warped_grid_edge(
+        image,
+        corners.top_left,
+        corners.top_right,
+        mesh,
+        preview_scale,
+        color,
+    );
+    draw_warped_grid_edge(
+        image,
+        corners.bottom_left,
+        corners.bottom_right,
+        mesh,
+        preview_scale,
+        color,
+    );
+    draw_warped_grid_edge(
+        image,
+        corners.top_left,
+        corners.bottom_left,
+        mesh,
+        preview_scale,
+        color,
+    );
+    draw_warped_grid_edge(
+        image,
+        corners.top_right,
+        corners.bottom_right,
+        mesh,
+        preview_scale,
+        color,
+    );
 }
 
 fn draw_warped_grid_edge(
@@ -1961,30 +2059,6 @@ fn draw_warped_grid_edge(
         ),
         color,
     );
-}
-
-fn draw_warped_grid_point(
-    image: &mut RawImage,
-    point: (f32, f32),
-    mesh: &MeshResult,
-    preview_scale: u32,
-) {
-    let mesh_scale = mesh.scale_used.max(1);
-    let x = debug_grid_coordinate(
-        point.0.round().max(0.0) as u32,
-        mesh.debug_crop_offset.0,
-        mesh_scale,
-        preview_scale,
-        image.width,
-    );
-    let y = debug_grid_coordinate(
-        point.1.round().max(0.0) as u32,
-        mesh.debug_crop_offset.1,
-        mesh_scale,
-        preview_scale,
-        image.height,
-    );
-    draw_anchor_point(image, x, y, [255, 255, 0, 255]);
 }
 
 fn debug_grid_coordinate(
@@ -2191,6 +2265,40 @@ mod tests {
     }
 
     #[test]
+    fn sample_cells_preserves_same_color_subject_pixels_disconnected_from_background() {
+        let background = [103, 214, 79, 255];
+        let object = [255, 0, 0, 255];
+        let cells = [
+            background, background, background, background, background, background, object, object,
+            object, background, background, object, background, object, background, background,
+            object, object, object, background, background, background, background, background,
+            background,
+        ];
+        let mut data = Vec::new();
+        for cell_y in 0..5 {
+            for _ in 0..2 {
+                for cell_x in 0..5 {
+                    for _ in 0..2 {
+                        data.extend_from_slice(&cells[cell_y * 5 + cell_x]);
+                    }
+                }
+            }
+        }
+        let image = RawImage::new(10, 10, data);
+        let mesh = Mesh {
+            lines_x: vec![0, 2, 4, 6, 8, 10],
+            lines_y: vec![0, 2, 4, 6, 8, 10],
+            warp: None,
+        };
+
+        let sampled = sample_cells(&image, &mesh, 5, true);
+
+        assert_eq!(sampled.pixel(0, 0), [0, 0, 0, 0]);
+        assert_eq!(sampled.pixel(1, 1), object);
+        assert_eq!(sampled.pixel(2, 2), background);
+    }
+
+    #[test]
     fn warped_grid_overlay_draws_connected_merged_nodes() {
         let base = RawImage::transparent(7, 7);
         let mesh = MeshResult {
@@ -2211,10 +2319,76 @@ mod tests {
         };
 
         let corners = warped_cell_corners(&mesh.mesh, 0, 0).unwrap();
-        let overlay = draw_grid_overlay(&base, &base, &mesh, 1);
+        let overlay = draw_grid_overlay(&base, &mesh, 1);
 
         assert_eq!(corners.bottom_left, (1.0, 3.0));
-        assert_eq!(overlay.pixel(1, 2), [255, 0, 0, 255]);
+        assert_eq!(overlay.pixel(1, 3), DEBUG_GRID_COLOR);
+    }
+
+    #[test]
+    fn warped_grid_overlay_draws_unwarped_grid_in_light_blue_under_red_grid() {
+        let base = RawImage::transparent(12, 12);
+        let mesh = MeshResult {
+            mesh: Mesh {
+                lines_x: vec![0, 8],
+                lines_y: vec![0, 8],
+                warp: Some(MeshWarp {
+                    lines_x_by_row: vec![vec![0, 10]],
+                    lines_y_by_column: vec![vec![0, 10]],
+                }),
+            },
+            detected_pixel_width: 8,
+            pixel_width_source: PixelWidthSource::Hough,
+            scale_used: 1,
+            debug_crop_offset: (0, 0),
+            debug_anchor_lines_x: None,
+            debug_anchor_lines_y: None,
+        };
+
+        let overlay = draw_grid_overlay(&base, &mesh, 1);
+
+        assert_eq!(overlay.pixel(8, 4), DEBUG_UNWARPED_GRID_COLOR);
+        assert_eq!(overlay.pixel(0, 0), DEBUG_GRID_COLOR);
+        assert_eq!(overlay.pixel(5, 5), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn warped_grid_overlay_draws_only_cell_boundaries_in_red() {
+        let mut source = RawImage::transparent(7, 7);
+        for y in 0..7 {
+            for x in 0..7 {
+                let value = if y < 2 { 0 } else { 255 };
+                source.set_pixel(x, y, [value, value, value, 255]);
+            }
+        }
+        let mesh = MeshResult {
+            mesh: Mesh {
+                lines_x: vec![0, 6],
+                lines_y: vec![3, 6],
+                warp: Some(MeshWarp {
+                    lines_x_by_row: vec![vec![0, 6]],
+                    lines_y_by_column: vec![vec![3, 6]],
+                }),
+            },
+            detected_pixel_width: 3,
+            pixel_width_source: PixelWidthSource::Hough,
+            scale_used: 1,
+            debug_crop_offset: (0, 0),
+            debug_anchor_lines_x: None,
+            debug_anchor_lines_y: None,
+        };
+        let corners = warped_cell_corners(&mesh.mesh, 0, 0).unwrap();
+        let subdivision = subdivided_warped_cell_grid(&source, corners);
+        let top_midpoint = subdivision.points[0][1];
+
+        let overlay = draw_grid_overlay(&source, &mesh, 1);
+
+        assert!(top_midpoint.1 < 3.0);
+        assert_ne!(
+            overlay.pixel(top_midpoint.0.round() as u32, top_midpoint.1.round() as u32),
+            DEBUG_GRID_COLOR
+        );
+        assert_eq!(overlay.pixel(3, 3), DEBUG_GRID_COLOR);
     }
 
     #[test]

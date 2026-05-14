@@ -362,17 +362,19 @@ fn clean_category_outputs(categories: &[Category]) -> Result<()> {
     for category in categories {
         let path = output_dir().join(&category.output_dir);
         if path.exists() {
-            remove_dir_all_with_retry(&path)
+            clear_dir_contents_with_retry(&path)
                 .with_context(|| format!("failed to clean {}", path.display()))?;
+            remove_empty_dir_if_possible(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
         }
     }
     Ok(())
 }
 
-fn remove_dir_all_with_retry(path: &Path) -> Result<()> {
+fn clear_dir_contents_with_retry(path: &Path) -> Result<()> {
     let mut last_error = None;
     for _ in 0..8 {
-        match std::fs::remove_dir_all(path) {
+        match clear_dir_contents(path) {
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
@@ -382,9 +384,61 @@ fn remove_dir_all_with_retry(path: &Path) -> Result<()> {
         }
     }
     match last_error {
+        Some(error) => Err(error).with_context(|| format!("failed to clean {}", path.display())),
+        None => Ok(()),
+    }
+}
+
+fn clear_dir_contents(path: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            clear_dir_contents_with_retry(&entry_path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            remove_empty_dir_if_possible(&entry_path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        } else {
+            std::fs::remove_file(entry_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_empty_dir_if_possible(path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for _ in 0..8 {
+        match std::fs::remove_dir(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if is_busy_directory_error(&error) && is_empty_dir(path)? => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    match last_error {
+        Some(error) if is_busy_directory_error(&error) && is_empty_dir(path)? => Ok(()),
         Some(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
         None => Ok(()),
     }
+}
+
+fn is_empty_dir(path: &Path) -> Result<bool> {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => Ok(entries.next().is_none()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn is_busy_directory_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(32) | Some(33) | Some(145) | Some(1224)
+    ) || error.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 fn split_list(values: impl IntoIterator<Item = String>) -> Vec<String> {

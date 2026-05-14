@@ -30,6 +30,34 @@ pub struct FitInsideBounds {
     pub offset_y: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundMask {
+    pub width: u32,
+    pub height: u32,
+    data: Vec<u8>,
+}
+
+impl BackgroundMask {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0; width as usize * height as usize],
+        }
+    }
+
+    pub fn is_background(&self, x: u32, y: u32) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        self.data[(y * self.width + x) as usize] != 0
+    }
+
+    fn set_background(&mut self, x: u32, y: u32) {
+        self.data[(y * self.width + x) as usize] = 1;
+    }
+}
+
 impl RawImage {
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
         debug_assert_eq!(data.len(), width as usize * height as usize * 4);
@@ -236,11 +264,31 @@ pub fn downscale_ignoring_transparent(image: &RawImage, width: u32, height: u32)
 }
 
 pub fn make_boundary_background_transparent(image: &RawImage) -> RawImage {
-    if mostly_transparent_boundary(image) {
+    let Some(background) = boundary_background_color(image) else {
         return image.clone();
-    }
-    let background = most_common_boundary_color(image);
-    let mut out = image.clone();
+    };
+    make_boundary_background_transparent_with_color(image, &background)
+}
+
+pub fn boundary_background_color(image: &RawImage) -> Option<[u8; 4]> {
+    (!mostly_transparent_boundary(image)).then(|| most_common_boundary_color(image))
+}
+
+pub fn make_boundary_background_transparent_with_color(
+    image: &RawImage,
+    background: &[u8; 4],
+) -> RawImage {
+    let mask = boundary_background_mask_with_color(image, background);
+    let mut out = apply_background_mask(image, &mask);
+    remove_boundary_background_fringe(&mut out, background);
+    out
+}
+
+pub fn boundary_background_mask_with_color(
+    image: &RawImage,
+    background: &[u8; 4],
+) -> BackgroundMask {
+    let mut mask = BackgroundMask::new(image.width, image.height);
     let mut queue = std::collections::VecDeque::new();
     let mut visited = vec![false; image.width as usize * image.height as usize];
 
@@ -264,10 +312,10 @@ pub fn make_boundary_background_transparent(image: &RawImage) -> RawImage {
         visited[index] = true;
         let pixel = image.pixel(x, y);
         if pixel[3] < ALPHA_THRESHOLD
-            || color_distance_sq(&pixel, &background)
+            || color_distance_sq(&pixel, background)
                 <= BOUNDARY_BACKGROUND_TRANSPARENCY_DISTANCE_LIMIT
         {
-            out.set_pixel(x, y, [0, 0, 0, 0]);
+            mask.set_background(x, y);
             if x > 0 {
                 queue.push_back((x - 1, y));
             }
@@ -282,7 +330,19 @@ pub fn make_boundary_background_transparent(image: &RawImage) -> RawImage {
             }
         }
     }
-    remove_boundary_background_fringe(&mut out, &background);
+    mask
+}
+
+pub fn apply_background_mask(image: &RawImage, mask: &BackgroundMask) -> RawImage {
+    debug_assert_eq!((image.width, image.height), (mask.width, mask.height));
+    let mut out = image.clone();
+    for y in 0..image.height {
+        for x in 0..image.width {
+            if mask.is_background(x, y) {
+                out.set_pixel(x, y, [0, 0, 0, 0]);
+            }
+        }
+    }
     out
 }
 
@@ -561,7 +621,7 @@ fn most_common_boundary_color(image: &RawImage) -> [u8; 4] {
     ]
 }
 
-fn color_distance_sq(pixel: &[u8; 4], background: &[u8; 4]) -> i32 {
+pub(crate) fn color_distance_sq(pixel: &[u8; 4], background: &[u8; 4]) -> i32 {
     let dr = pixel[0] as i32 - background[0] as i32;
     let dg = pixel[1] as i32 - background[1] as i32;
     let db = pixel[2] as i32 - background[2] as i32;

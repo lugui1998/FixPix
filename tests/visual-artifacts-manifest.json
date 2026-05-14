@@ -45,6 +45,7 @@
         "axe.png",
         "blob.png",
         "demon.png",
+        "dragon_zoom.png",
         "fish.png",
         "fish_2.png",
         "pumpkin.png"
@@ -71,7 +72,8 @@
         "armor4.png",
         "armor5.png",
         "armor6.png",
-        "axe.png"
+        "axe.png",
+        "dragon_zoom.png"
       ],
       "scenarios": [
         {

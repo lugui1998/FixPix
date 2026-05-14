@@ -13,7 +13,16 @@ pub const ALPHA_THRESHOLD: u8 = 128;
 const BOUNDARY_BACKGROUND_TRANSPARENCY_DISTANCE_LIMIT: i32 = 8000;
 const BOUNDARY_BACKGROUND_FRINGE_DISTANCE_LIMIT: i32 = 36000;
 const BOUNDARY_BACKGROUND_FRINGE_PASSES: usize = 2;
+const VIVID_BACKGROUND_CHROMA_MIN: u8 = 48;
+const VIVID_BACKGROUND_VALUE_MIN: u8 = 96;
+const LOCAL_BACKGROUND_SUPPORT_RADIUS: u32 = 2;
+const LOCAL_BACKGROUND_SUPPORT_REJECT_DISTANCE_LIMIT: i32 = 400;
+const LOCAL_SIMILAR_COLOR_DISTANCE_LIMIT: i32 = 3500;
+const LOCAL_SIMILAR_SUPPORT_MIN: u32 = 3;
+const LOCAL_OPPOSING_SUPPORT_MARGIN: u32 = 3;
+const LOCAL_STRONG_FOREGROUND_SUPPORT_MIN: u32 = 3;
 const DOWNSCALE_MIN_OPAQUE_COVERAGE: f32 = 0.06;
+const EDGE_MASK_COLOR_DELTA_THRESHOLD: u32 = 80;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawImage {
@@ -270,6 +279,20 @@ pub fn make_boundary_background_transparent(image: &RawImage) -> RawImage {
     make_boundary_background_transparent_with_color(image, &background)
 }
 
+pub fn make_boundary_background_transparent_with_edge_closing(
+    image: &RawImage,
+    edge_close_kernel_size: u32,
+) -> RawImage {
+    let Some(background) = boundary_background_color(image) else {
+        return image.clone();
+    };
+    make_boundary_background_transparent_with_color_and_edge_closing(
+        image,
+        &background,
+        edge_close_kernel_size,
+    )
+}
+
 pub fn boundary_background_color(image: &RawImage) -> Option<[u8; 4]> {
     (!mostly_transparent_boundary(image)).then(|| most_common_boundary_color(image))
 }
@@ -278,7 +301,19 @@ pub fn make_boundary_background_transparent_with_color(
     image: &RawImage,
     background: &[u8; 4],
 ) -> RawImage {
-    let mask = boundary_background_mask_with_color(image, background);
+    make_boundary_background_transparent_with_color_and_edge_closing(image, background, 0)
+}
+
+pub fn make_boundary_background_transparent_with_color_and_edge_closing(
+    image: &RawImage,
+    background: &[u8; 4],
+    edge_close_kernel_size: u32,
+) -> RawImage {
+    let mask = boundary_background_mask_with_color_and_edge_closing(
+        image,
+        background,
+        edge_close_kernel_size,
+    );
     let mut out = apply_background_mask(image, &mask);
     remove_boundary_background_fringe(&mut out, background);
     out
@@ -288,9 +323,20 @@ pub fn boundary_background_mask_with_color(
     image: &RawImage,
     background: &[u8; 4],
 ) -> BackgroundMask {
+    boundary_background_mask_with_color_and_edge_closing(image, background, 0)
+}
+
+pub fn boundary_background_mask_with_color_and_edge_closing(
+    image: &RawImage,
+    background: &[u8; 4],
+    edge_close_kernel_size: u32,
+) -> BackgroundMask {
     let mut mask = BackgroundMask::new(image.width, image.height);
     let mut queue = std::collections::VecDeque::new();
     let mut visited = vec![false; image.width as usize * image.height as usize];
+    let edge_barrier =
+        (edge_close_kernel_size > 1).then(|| closed_color_edge_mask(image, edge_close_kernel_size));
+    let background_is_vivid = has_vivid_chroma(background);
 
     for x in 0..image.width {
         queue.push_back((x, 0));
@@ -311,11 +357,27 @@ pub fn boundary_background_mask_with_color(
         }
         visited[index] = true;
         let pixel = image.pixel(x, y);
-        if pixel[3] < ALPHA_THRESHOLD
-            || color_distance_sq(&pixel, background)
-                <= BOUNDARY_BACKGROUND_TRANSPARENCY_DISTANCE_LIMIT
+        let distance = color_distance_sq(&pixel, background);
+        if pixel[3] < ALPHA_THRESHOLD || distance <= BOUNDARY_BACKGROUND_TRANSPARENCY_DISTANCE_LIMIT
         {
+            let is_edge_barrier = edge_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier[index] != 0 && !is_boundary_pixel(image, x, y));
+            if is_edge_barrier && pixel[3] >= ALPHA_THRESHOLD {
+                let support = local_foreground_support(Some(&mask), image, background, pixel, x, y);
+                if local_support_keeps_background_candidate(
+                    pixel,
+                    background,
+                    background_is_vivid,
+                    support,
+                ) {
+                    continue;
+                }
+            }
             mask.set_background(x, y);
+            if is_edge_barrier {
+                continue;
+            }
             if x > 0 {
                 queue.push_back((x - 1, y));
             }
@@ -330,7 +392,283 @@ pub fn boundary_background_mask_with_color(
             }
         }
     }
+    refine_boundary_background_mask(&mut mask, image, background, edge_barrier.as_deref());
     mask
+}
+
+pub(crate) fn color_edge_mask(image: &RawImage) -> Vec<u8> {
+    let mut mask = vec![0; image.width as usize * image.height as usize];
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let current = image.pixel(x, y);
+            let right = if x + 1 < image.width {
+                image.pixel(x + 1, y)
+            } else {
+                current
+            };
+            let down = if y + 1 < image.height {
+                image.pixel(x, y + 1)
+            } else {
+                current
+            };
+            let edge = rgba_delta(current, right).max(rgba_delta(current, down));
+            if edge > EDGE_MASK_COLOR_DELTA_THRESHOLD {
+                mask[(y * image.width + x) as usize] = 1;
+            }
+        }
+    }
+    mask
+}
+
+pub(crate) fn closed_color_edge_mask(image: &RawImage, kernel_size: u32) -> Vec<u8> {
+    close_binary_mask(
+        image.width,
+        image.height,
+        &color_edge_mask(image),
+        kernel_size,
+    )
+}
+
+pub(crate) fn close_binary_mask(width: u32, height: u32, data: &[u8], kernel_size: u32) -> Vec<u8> {
+    debug_assert_eq!(data.len(), width as usize * height as usize);
+    if kernel_size <= 1 || width == 0 || height == 0 {
+        return data.to_vec();
+    }
+    let radius = kernel_size / 2;
+    let dilated = dilate_binary_mask(width, height, data, radius);
+    erode_binary_mask(width, height, &dilated, radius)
+}
+
+fn dilate_binary_mask(width: u32, height: u32, data: &[u8], radius: u32) -> Vec<u8> {
+    let mut out = vec![0; width as usize * height as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let (x0, x1, y0, y1) = kernel_bounds(width, height, x, y, radius);
+            let mut found = false;
+            'scan: for yy in y0..=y1 {
+                for xx in x0..=x1 {
+                    if data[(yy * width + xx) as usize] != 0 {
+                        found = true;
+                        break 'scan;
+                    }
+                }
+            }
+            if found {
+                out[(y * width + x) as usize] = 1;
+            }
+        }
+    }
+    out
+}
+
+fn erode_binary_mask(width: u32, height: u32, data: &[u8], radius: u32) -> Vec<u8> {
+    let mut out = vec![0; width as usize * height as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let (x0, x1, y0, y1) = kernel_bounds(width, height, x, y, radius);
+            let mut all_set = true;
+            'scan: for yy in y0..=y1 {
+                for xx in x0..=x1 {
+                    if data[(yy * width + xx) as usize] == 0 {
+                        all_set = false;
+                        break 'scan;
+                    }
+                }
+            }
+            if all_set {
+                out[(y * width + x) as usize] = 1;
+            }
+        }
+    }
+    out
+}
+
+fn kernel_bounds(width: u32, height: u32, x: u32, y: u32, radius: u32) -> (u32, u32, u32, u32) {
+    (
+        x.saturating_sub(radius),
+        x.saturating_add(radius).min(width.saturating_sub(1)),
+        y.saturating_sub(radius),
+        y.saturating_add(radius).min(height.saturating_sub(1)),
+    )
+}
+
+fn is_boundary_pixel(image: &RawImage, x: u32, y: u32) -> bool {
+    x == 0 || y == 0 || x + 1 == image.width || y + 1 == image.height
+}
+
+fn refine_boundary_background_mask(
+    mask: &mut BackgroundMask,
+    image: &RawImage,
+    background: &[u8; 4],
+    edge_barrier: Option<&[u8]>,
+) {
+    let background_is_vivid = has_vivid_chroma(background);
+    for _ in 0..BOUNDARY_BACKGROUND_FRINGE_PASSES {
+        let mut fringe = Vec::new();
+        for y in 0..image.height {
+            for x in 0..image.width {
+                if !is_boundary_background_fringe_candidate(
+                    mask,
+                    image,
+                    background,
+                    edge_barrier,
+                    background_is_vivid,
+                    x,
+                    y,
+                ) {
+                    continue;
+                }
+                fringe.push((x, y));
+            }
+        }
+
+        if fringe.is_empty() {
+            break;
+        }
+
+        for (x, y) in fringe {
+            mask.set_background(x, y);
+        }
+    }
+}
+
+fn is_boundary_background_fringe_candidate(
+    mask: &BackgroundMask,
+    image: &RawImage,
+    background: &[u8; 4],
+    edge_barrier: Option<&[u8]>,
+    background_is_vivid: bool,
+    x: u32,
+    y: u32,
+) -> bool {
+    if mask.is_background(x, y) || !touches_background_cardinal_neighbor(mask, x, y) {
+        return false;
+    }
+
+    let pixel = image.pixel(x, y);
+    if pixel[3] < ALPHA_THRESHOLD
+        || color_distance_sq(&pixel, background) > BOUNDARY_BACKGROUND_FRINGE_DISTANCE_LIMIT
+    {
+        return false;
+    }
+    if color_distance_sq(&pixel, background) == 0 {
+        return false;
+    }
+
+    let index = (y * image.width + x) as usize;
+    let is_edge_barrier =
+        edge_barrier.is_some_and(|barrier| barrier[index] != 0 && !is_boundary_pixel(image, x, y));
+    let support = local_foreground_support(Some(mask), image, background, pixel, x, y);
+    let keep_candidate =
+        local_support_keeps_background_candidate(pixel, background, background_is_vivid, support);
+    if is_edge_barrier {
+        !keep_candidate
+    } else if background_is_vivid && shares_background_dominant_channel(pixel, *background) {
+        !keep_candidate
+    } else {
+        true
+    }
+}
+
+fn touches_background_cardinal_neighbor(mask: &BackgroundMask, x: u32, y: u32) -> bool {
+    (x > 0 && mask.is_background(x - 1, y))
+        || (y > 0 && mask.is_background(x, y - 1))
+        || (x + 1 < mask.width && mask.is_background(x + 1, y))
+        || (y + 1 < mask.height && mask.is_background(x, y + 1))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalForegroundSupport {
+    similar: u32,
+    strong: u32,
+    opposing: u32,
+}
+
+fn local_foreground_support(
+    mask: Option<&BackgroundMask>,
+    image: &RawImage,
+    background: &[u8; 4],
+    candidate: [u8; 4],
+    x: u32,
+    y: u32,
+) -> LocalForegroundSupport {
+    let x0 = x.saturating_sub(LOCAL_BACKGROUND_SUPPORT_RADIUS);
+    let x1 = x
+        .saturating_add(LOCAL_BACKGROUND_SUPPORT_RADIUS)
+        .min(image.width.saturating_sub(1));
+    let y0 = y.saturating_sub(LOCAL_BACKGROUND_SUPPORT_RADIUS);
+    let y1 = y
+        .saturating_add(LOCAL_BACKGROUND_SUPPORT_RADIUS)
+        .min(image.height.saturating_sub(1));
+    let mut support = LocalForegroundSupport::default();
+    for yy in y0..=y1 {
+        for xx in x0..=x1 {
+            if xx == x && yy == y {
+                continue;
+            }
+            let pixel = image.pixel(xx, yy);
+            if pixel[3] < ALPHA_THRESHOLD || mask.is_some_and(|mask| mask.is_background(xx, yy)) {
+                continue;
+            }
+            if color_distance_sq(&pixel, background)
+                <= LOCAL_BACKGROUND_SUPPORT_REJECT_DISTANCE_LIMIT
+            {
+                continue;
+            }
+            let weight = local_support_weight(x.abs_diff(xx), y.abs_diff(yy));
+            if color_distance_sq(&pixel, &candidate) <= LOCAL_SIMILAR_COLOR_DISTANCE_LIMIT {
+                support.similar += weight;
+            }
+            if !shares_background_dominant_channel(pixel, *background)
+                && color_distance_sq(&pixel, background)
+                    > BOUNDARY_BACKGROUND_TRANSPARENCY_DISTANCE_LIMIT
+            {
+                support.opposing += weight;
+            }
+            if color_distance_sq(&pixel, background) > BOUNDARY_BACKGROUND_FRINGE_DISTANCE_LIMIT {
+                support.strong += weight;
+            }
+        }
+    }
+    support
+}
+
+fn local_support_keeps_background_candidate(
+    candidate: [u8; 4],
+    background: &[u8; 4],
+    background_is_vivid: bool,
+    support: LocalForegroundSupport,
+) -> bool {
+    if color_distance_sq(&candidate, background) == 0 {
+        return false;
+    }
+    let has_similar = support.similar >= LOCAL_SIMILAR_SUPPORT_MIN;
+    let has_strong = support.strong >= LOCAL_STRONG_FOREGROUND_SUPPORT_MIN;
+    if background_is_vivid && shares_background_dominant_channel(candidate, *background) {
+        let opposing_blocks = support.opposing >= support.similar + LOCAL_OPPOSING_SUPPORT_MARGIN;
+        (has_similar && !opposing_blocks) || (!has_strong && !opposing_blocks)
+    } else {
+        has_similar || has_strong
+    }
+}
+
+fn local_support_weight(dx: u32, dy: u32) -> u32 {
+    if dx <= 1 && dy <= 1 { 3 } else { 1 }
+}
+
+fn has_vivid_chroma(pixel: &[u8; 4]) -> bool {
+    let max = pixel[0].max(pixel[1]).max(pixel[2]);
+    let min = pixel[0].min(pixel[1]).min(pixel[2]);
+    max >= VIVID_BACKGROUND_VALUE_MIN && max - min >= VIVID_BACKGROUND_CHROMA_MIN
+}
+
+fn shares_background_dominant_channel(pixel: [u8; 4], background: [u8; 4]) -> bool {
+    let pixel_max = pixel[0].max(pixel[1]).max(pixel[2]);
+    let background_max = background[0].max(background[1]).max(background[2]);
+    (0..3).any(|channel| {
+        pixel[channel].saturating_add(8) >= pixel_max
+            && background[channel].saturating_add(8) >= background_max
+    })
 }
 
 pub fn apply_background_mask(image: &RawImage, mask: &BackgroundMask) -> RawImage {
@@ -628,6 +966,13 @@ pub(crate) fn color_distance_sq(pixel: &[u8; 4], background: &[u8; 4]) -> i32 {
     dr * dr + dg * dg + db * db
 }
 
+fn rgba_delta(left: [u8; 4], right: [u8; 4]) -> u32 {
+    left[0].abs_diff(right[0]) as u32
+        + left[1].abs_diff(right[1]) as u32
+        + left[2].abs_diff(right[2]) as u32
+        + left[3].abs_diff(right[3]) as u32
+}
+
 #[allow(dead_code)]
 fn _decode_cursor(bytes: Vec<u8>) -> Cursor<Vec<u8>> {
     Cursor::new(bytes)
@@ -729,6 +1074,123 @@ mod tests {
         image = make_boundary_background_transparent(&image);
 
         assert_eq!(image.pixel(1, 1), [183, 175, 180, 255]);
+    }
+
+    #[test]
+    fn binary_closing_bridges_single_pixel_edge_gaps() {
+        let mut mask = vec![0; 7 * 5];
+        mask[2 * 7 + 2] = 1;
+        mask[2 * 7 + 4] = 1;
+
+        let closed = close_binary_mask(7, 5, &mask, 3);
+
+        let mut expected = vec![0; 7 * 5];
+        expected[2 * 7 + 2] = 1;
+        expected[2 * 7 + 3] = 1;
+        expected[2 * 7 + 4] = 1;
+        assert_eq!(closed, expected);
+    }
+
+    #[test]
+    fn closed_edge_barrier_preserves_black_details_inside_subject() {
+        let black = [0, 0, 0, 255];
+        let red = [255, 0, 0, 255];
+        let mut image = RawImage::new(7, 7, black.repeat(49));
+        for y in 1..=5 {
+            for x in 1..=5 {
+                if x == 1 || x == 5 || y == 1 || y == 5 {
+                    image.set_pixel(x, y, red);
+                }
+            }
+        }
+        image.set_pixel(3, 1, black);
+
+        let leaking = boundary_background_mask_with_color(&image, &black);
+        let protected = boundary_background_mask_with_color_and_edge_closing(&image, &black, 3);
+
+        assert!(leaking.is_background(3, 3));
+        assert!(protected.is_background(3, 1));
+        assert!(!protected.is_background(3, 3));
+    }
+
+    #[test]
+    fn closed_edge_barrier_keeps_background_like_subject_outline() {
+        let background = [0, 1, 21, 255];
+        let outline = [0, 0, 0, 255];
+        let red = [220, 0, 0, 255];
+        let mut image = RawImage::new(5, 5, background.repeat(25));
+        image.set_pixel(2, 1, outline);
+        image.set_pixel(2, 2, red);
+
+        let mask = boundary_background_mask_with_color_and_edge_closing(&image, &background, 3);
+
+        assert!(!mask.is_background(2, 1));
+        assert!(!mask.is_background(2, 2));
+    }
+
+    #[test]
+    fn local_mask_refinement_keeps_dark_subject_detail_with_neighbor_support() {
+        let background = [0, 1, 21, 255];
+        let dark_detail = [0, 0, 2, 255];
+        let red = [220, 0, 0, 255];
+        let mut image = RawImage::new(5, 5, background.repeat(25));
+        image.set_pixel(2, 1, dark_detail);
+        image.set_pixel(2, 2, red);
+
+        let mask = boundary_background_mask_with_color_and_edge_closing(&image, &background, 3);
+
+        assert!(!mask.is_background(2, 1));
+        assert!(!mask.is_background(2, 2));
+    }
+
+    #[test]
+    fn mask_refinement_removes_vivid_background_edge_fringe() {
+        let background = [103, 214, 79, 255];
+        let fringe = [105, 172, 76, 255];
+        let orange = [230, 80, 0, 255];
+        let mut image = RawImage::new(5, 5, background.repeat(25));
+        image.set_pixel(2, 1, fringe);
+        image.set_pixel(2, 2, orange);
+
+        let mask = boundary_background_mask_with_color_and_edge_closing(&image, &background, 3);
+
+        assert!(mask.is_background(2, 1));
+        assert!(!mask.is_background(2, 2));
+    }
+
+    #[test]
+    fn mask_refinement_removes_green_fringe_in_warm_foreground_context() {
+        let background = [103, 214, 79, 255];
+        let fringe = [105, 172, 76, 255];
+        let similar_fringe = [92, 136, 57, 255];
+        let orange = [230, 80, 0, 255];
+        let mut image = RawImage::new(5, 5, background.repeat(25));
+        image.set_pixel(2, 1, fringe);
+        image.set_pixel(3, 1, similar_fringe);
+        image.set_pixel(1, 2, orange);
+        image.set_pixel(2, 2, orange);
+        image.set_pixel(3, 2, orange);
+
+        let mask = boundary_background_mask_with_color_and_edge_closing(&image, &background, 3);
+
+        assert!(mask.is_background(2, 1));
+        assert!(mask.is_background(3, 1));
+        assert!(!mask.is_background(2, 2));
+    }
+
+    #[test]
+    fn mask_refinement_keeps_vivid_background_colored_subject_patch() {
+        let background = [103, 214, 79, 255];
+        let leaf_edge = [86, 138, 45, 255];
+        let leaf_fill = [92, 135, 54, 255];
+        let mut image = RawImage::new(5, 5, background.repeat(25));
+        image.set_pixel(2, 1, leaf_edge);
+        image.set_pixel(2, 2, leaf_fill);
+
+        let mask = boundary_background_mask_with_color_and_edge_closing(&image, &background, 3);
+
+        assert!(!mask.is_background(2, 1));
+        assert!(!mask.is_background(2, 2));
     }
 
     #[test]

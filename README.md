@@ -115,12 +115,15 @@ fixpix ./input.png --pixel-width 8
 | `--downscale <n\|WxH>` | positive integer or size | none | Removes detected boundary background, crops transparent padding, and fits the source into the requested size before pixel processing. A single number means square size. |
 | `--downscale-sample-from <pixelated\|original>` | enum | `pixelated` | `pixelated` keeps the resized downscale result. `original` samples dominant colors from the cleaned original image. |
 | `-t, --transparent` | flag | `false` | Masks detected boundary-connected background before sampling and removes adjacent sampled background fringes. |
+| `--edge-close-kernel-size <n>` | `0` or odd integer | `3` | Closes the detected edge mask before using it as a transparency flood-fill barrier and in debug edge previews. `0` disables closing. |
 | `--crop` | flag | `false` | Crops transparent padding from the final unscaled sprite. |
 | `--crop-size <n\|WxH>` | positive integer or size | none | Crops transparent padding and centers content in the requested canvas size. A single number means square size. |
 | `-w, --pixel-width <n>` | positive integer | automatic detection | Forces a known source pixel width. |
 | `--pixel-width-detector <projection\|hough\|hybrid>` | enum | `hybrid` | Selects automatic pixel-width detection strategy. |
 | `-u, --initial-upscale <n>` | positive integer | `2` | Upscale factor used before mesh detection. Higher values can help small inputs but cost more CPU time. |
-| `--warp-subdivision-depth <n>` | integer `0-4` | `1` | Maximum internal warp sampling subdivision depth. `0` disables subdivision; higher values can follow bent pixel boundaries but may overfit. |
+| `--min-input-width <n>` | integer | `512` | Minimum input width used for pixel processing. If the source is smaller, it is doubled with nearest-neighbor scaling until this width is met. `0` disables the width check. |
+| `--min-input-height <n>` | integer | `512` | Minimum input height used for pixel processing. If the source is smaller, it is doubled with nearest-neighbor scaling until this height is met. `0` disables the height check. |
+| `--warp-subdivision-depth <n>` | integer `0-4` | `2` | Maximum adaptive warp subdivision depth. `0` disables subdivision; higher values allow bent pixel boundaries to be followed where local edge evidence justifies splitting. |
 | `--warp-subdivision-edge-threshold <n>` | number | `18` | Minimum local edge strength required before an internal warp subdivision point can move. Higher values ignore weaker texture/artifact edges. |
 | `-f, --format <png\|jpeg\|webp>` | enum | inferred or `png` | Output format. If omitted, inferred from output path, URL extension, or defaults to PNG. |
 | `-q, --quality <1-100>` | integer | encoder default | JPEG quality. PNG ignores this option. WebP quality is currently rejected because WebP output uses the lossless encoder. |

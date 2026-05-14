@@ -38,13 +38,25 @@ pub fn sample_cell_color(
     y1: u32,
     sample_grid: u32,
 ) -> [u8; 4] {
+    sample_cell_color_with_min_opaque_coverage(image, x0, x1, y0, y1, sample_grid, 0.5)
+}
+
+pub(crate) fn sample_cell_color_with_min_opaque_coverage(
+    image: &RawImage,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    y1: u32,
+    sample_grid: u32,
+    min_opaque_coverage: f32,
+) -> [u8; 4] {
     if x1 <= x0 || y1 <= y0 {
         return [0, 0, 0, 0];
     }
     if sample_grid <= 1 {
-        return sample_cell_center_color(image, x0, x1, y0, y1, sample_grid);
+        return sample_cell_center_color(image, x0, x1, y0, y1, sample_grid, min_opaque_coverage);
     }
-    dominant_cell_color_by_binning(image, x0, x1, y0, y1)
+    dominant_cell_color_by_binning(image, x0, x1, y0, y1, min_opaque_coverage)
 }
 
 fn sample_cell_center_color(
@@ -54,6 +66,7 @@ fn sample_cell_center_color(
     y0: u32,
     y1: u32,
     sample_grid: u32,
+    min_opaque_coverage: f32,
 ) -> [u8; 4] {
     let sample_xs = centered_sample_positions(x0, x1, sample_grid);
     let sample_ys = centered_sample_positions(y0, y1, sample_grid);
@@ -87,7 +100,7 @@ fn sample_cell_center_color(
         }
     }
 
-    if total_samples == 0 || opaque_samples <= total_samples / 2 {
+    if !has_min_opaque_coverage(opaque_samples, total_samples, min_opaque_coverage) {
         return [0, 0, 0, 0];
     }
     best_key
@@ -117,7 +130,14 @@ fn centered_sample_positions(start: u32, end: u32, sample_grid: u32) -> Vec<u32>
         .collect()
 }
 
-fn dominant_cell_color_by_binning(image: &RawImage, x0: u32, x1: u32, y0: u32, y1: u32) -> [u8; 4] {
+fn dominant_cell_color_by_binning(
+    image: &RawImage,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    y1: u32,
+    min_opaque_coverage: f32,
+) -> [u8; 4] {
     let mut primary_bin_counts = [0u32; DOMINANT_BIN_TOTAL];
     let mut shifted_bin_counts = [0u32; DOMINANT_BIN_TOTAL];
     let mut opaque_count = 0u32;
@@ -156,7 +176,7 @@ fn dominant_cell_color_by_binning(image: &RawImage, x0: u32, x1: u32, y0: u32, y
         }
     }
 
-    if total_count == 0 || opaque_count <= total_count / 2 {
+    if !has_min_opaque_coverage(opaque_count, total_count, min_opaque_coverage) {
         return [0, 0, 0, 0];
     }
     if opaque_count == 1 {
@@ -194,6 +214,14 @@ fn dominant_cell_color_by_binning(image: &RawImage, x0: u32, x1: u32, y0: u32, y
         median_channel_from_histogram(&blue_histogram, selected_bin_count),
         255,
     ]
+}
+
+pub(crate) fn has_min_opaque_coverage(
+    opaque_count: u32,
+    total_count: u32,
+    min_opaque_coverage: f32,
+) -> bool {
+    total_count > 0 && opaque_count as f32 / total_count as f32 > min_opaque_coverage
 }
 
 fn color_bin_index(r: u8, g: u8, b: u8, offset: u8) -> usize {
@@ -1249,6 +1277,19 @@ mod tests {
     fn samples_opaque_color_when_cell_is_majority_opaque() {
         let image = RawImage::new(3, 1, vec![255, 0, 0, 0, 0, 0, 255, 255, 0, 0, 255, 255]);
         assert_eq!(sample_cell_color(&image, 0, 3, 0, 1, 5), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn samples_sparse_opaque_color_with_lower_coverage_threshold() {
+        let mut image = RawImage::transparent(5, 5);
+        image.set_pixel(2, 2, [255, 0, 0, 255]);
+        image.set_pixel(2, 3, [255, 0, 0, 255]);
+
+        assert_eq!(sample_cell_color(&image, 0, 5, 0, 5, 5), [0, 0, 0, 0]);
+        assert_eq!(
+            sample_cell_color_with_min_opaque_coverage(&image, 0, 5, 0, 5, 5, 0.06),
+            [255, 0, 0, 255]
+        );
     }
 
     #[test]

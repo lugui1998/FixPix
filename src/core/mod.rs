@@ -7,7 +7,7 @@ use crate::detection::{PixelWidthDetection, analyze_pixel_width};
 use crate::image::{
     RawImage, center_transparent_content, clear_fully_transparent_pixels, crop_transparent_padding,
     decode_image, downscale_ignoring_transparent, encode_image, fit_image_inside_dimensions,
-    make_boundary_background_transparent, scale_nearest,
+    make_boundary_background_transparent_with_edge_closing, scale_nearest,
 };
 use crate::mesh::{
     DEFAULT_WARP_SUBDIVISION_DEPTH, DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD, DebugSheetOptions,
@@ -17,6 +17,9 @@ use crate::mesh::{
 use crate::palette::{PaletteResult, create_palette_image, quantize_image};
 
 const MAX_ANCHORED_ASPECT_DRIFT: f32 = 0.18;
+pub const DEFAULT_EDGE_CLOSE_KERNEL_SIZE: u32 = 3;
+pub const DEFAULT_MIN_INPUT_WIDTH: u32 = 512;
+pub const DEFAULT_MIN_INPUT_HEIGHT: u32 = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputFormat {
@@ -112,6 +115,9 @@ pub struct TransformOptions {
     pub pixel_width: Option<u32>,
     pub pixel_width_detector: PixelWidthDetector,
     pub initial_upscale: u32,
+    pub min_input_width: u32,
+    pub min_input_height: u32,
+    pub edge_close_kernel_size: u32,
     pub warp_subdivision_depth: u32,
     pub warp_subdivision_edge_threshold: f32,
     pub artifacts: ArtifactOptions,
@@ -136,6 +142,9 @@ impl Default for TransformOptions {
             pixel_width: None,
             pixel_width_detector: PixelWidthDetector::Hybrid,
             initial_upscale: 2,
+            min_input_width: DEFAULT_MIN_INPUT_WIDTH,
+            min_input_height: DEFAULT_MIN_INPUT_HEIGHT,
+            edge_close_kernel_size: DEFAULT_EDGE_CLOSE_KERNEL_SIZE,
             warp_subdivision_depth: DEFAULT_WARP_SUBDIVISION_DEPTH,
             warp_subdivision_edge_threshold: DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD,
             artifacts: ArtifactOptions::default(),
@@ -178,7 +187,7 @@ pub fn transform_bytes(input: &[u8], options: &TransformOptions) -> Result<Trans
 
 pub fn transform_image(decoded: RawImage, options: &TransformOptions) -> Result<TransformResult> {
     validate_options(options)?;
-    let prepared = prepare_image(decoded, options);
+    let prepared = prepare_image(decoded, options)?;
     let sampled = sample_prepared(&prepared, options);
     let PaletteResult {
         image: downsampled,
@@ -233,7 +242,7 @@ pub fn transform_image(decoded: RawImage, options: &TransformOptions) -> Result<
         resolved_colors,
         scale_used: prepared.mesh.scale_used,
         metadata: TransformMetadata {
-            edge_close_kernel_size: 0,
+            edge_close_kernel_size: options.edge_close_kernel_size,
             palette_color_count: palette_colors.len(),
             pixel_width_source: prepared.mesh.pixel_width_source,
         },
@@ -249,9 +258,12 @@ struct PreparedImage {
     downscale_source: Option<RawImage>,
 }
 
-fn prepare_image(decoded: RawImage, options: &TransformOptions) -> PreparedImage {
+fn prepare_image(decoded: RawImage, options: &TransformOptions) -> Result<PreparedImage> {
     if let Some(size) = options.downscale {
-        let transparent = make_boundary_background_transparent(&decoded);
+        let transparent = make_boundary_background_transparent_with_edge_closing(
+            &decoded,
+            options.edge_close_kernel_size,
+        );
         let cropped = crop_transparent_padding(&clear_fully_transparent_pixels(&transparent));
         let resized = clear_fully_transparent_pixels(&downscale_ignoring_transparent(
             &cropped,
@@ -268,21 +280,32 @@ fn prepare_image(decoded: RawImage, options: &TransformOptions) -> PreparedImage
             debug_anchor_lines_y: None,
         };
         let debug_mesh = create_downscaled_source_mesh_result(&cropped, size.width, size.height);
-        return PreparedImage {
+        return Ok(PreparedImage {
             decoded: resized,
             debug_image: Some(cropped.clone()),
             mesh,
             debug_mesh,
             downscale_source: Some(cropped),
-        };
+        });
     }
 
+    let minimum_input_scale = minimum_input_scale(
+        decoded.width,
+        decoded.height,
+        options.min_input_width,
+        options.min_input_height,
+    )?;
+    let decoded = upscale_by_integer_scale(decoded, minimum_input_scale);
+
     let (detection, boundary_signals) = if let Some(width) = options.pixel_width {
+        let scaled_width = width
+            .checked_mul(minimum_input_scale)
+            .context("minimum input scaling would overflow manual pixel width")?;
         (
             PixelWidthDetection {
-                width,
-                width_x: width,
-                width_y: width,
+                width: scaled_width,
+                width_x: scaled_width,
+                width_y: scaled_width,
                 offset_x: 0,
                 offset_y: 0,
                 source: PixelWidthSource::Manual,
@@ -349,12 +372,44 @@ fn prepare_image(decoded: RawImage, options: &TransformOptions) -> PreparedImage
             .map(|(horizontal, vertical)| (horizontal.as_slice(), vertical.as_slice())),
     );
 
-    PreparedImage {
+    Ok(PreparedImage {
         decoded,
         debug_image: None,
         mesh: mesh.clone(),
         debug_mesh: mesh,
         downscale_source: None,
+    })
+}
+
+fn upscale_by_integer_scale(image: RawImage, scale: u32) -> RawImage {
+    if scale > 1 {
+        scale_nearest(&image, scale)
+    } else {
+        image
+    }
+}
+
+fn minimum_input_scale(width: u32, height: u32, min_width: u32, min_height: u32) -> Result<u32> {
+    if width == 0 || height == 0 || (min_width == 0 && min_height == 0) {
+        return Ok(1);
+    }
+
+    let mut scale = 1u32;
+    loop {
+        let scaled_width = width
+            .checked_mul(scale)
+            .context("minimum input scaling would overflow image width")?;
+        let scaled_height = height
+            .checked_mul(scale)
+            .context("minimum input scaling would overflow image height")?;
+        let width_ok = min_width == 0 || scaled_width >= min_width;
+        let height_ok = min_height == 0 || scaled_height >= min_height;
+        if width_ok && height_ok {
+            return Ok(scale);
+        }
+        scale = scale
+            .checked_mul(2)
+            .context("minimum input scale is too large")?;
     }
 }
 
@@ -452,7 +507,7 @@ fn sample_prepared(prepared: &PreparedImage, options: &TransformOptions) -> RawI
             options.color_sample_grid_size,
         );
     }
-    crate::mesh::sample_cells_with_warp_options(
+    crate::mesh::sample_cells_with_warp_and_edge_close_options(
         &prepared.decoded,
         &prepared.mesh.mesh,
         options.color_sample_grid_size,
@@ -461,6 +516,7 @@ fn sample_prepared(prepared: &PreparedImage, options: &TransformOptions) -> RawI
             max_depth: options.warp_subdivision_depth,
             edge_threshold: options.warp_subdivision_edge_threshold,
         },
+        options.edge_close_kernel_size,
     )
 }
 
@@ -538,6 +594,7 @@ fn write_artifacts(
                 debug_scale: options.artifacts.debug_scale,
                 palette_merge_threshold: options.palette_merge_threshold,
                 transparent_background: options.transparent_background,
+                edge_close_kernel_size: options.edge_close_kernel_size,
                 sample_grid: options.color_sample_grid_size,
                 warp_subdivision: WarpSubdivisionOptions {
                     max_depth: options.warp_subdivision_depth,
@@ -571,6 +628,9 @@ fn validate_options(options: &TransformOptions) -> Result<()> {
     }
     if options.initial_upscale == 0 {
         bail!("initial-upscale must be a positive integer");
+    }
+    if options.edge_close_kernel_size > 0 && options.edge_close_kernel_size.is_multiple_of(2) {
+        bail!("edge-close-kernel-size must be 0 or an odd positive integer");
     }
     if options.warp_subdivision_depth > MAX_WARP_SUBDIVISION_DEPTH {
         bail!("warp-subdivision-depth must be between 0 and {MAX_WARP_SUBDIVISION_DEPTH}");
@@ -610,8 +670,66 @@ mod tests {
     }
 
     #[test]
+    fn minimum_input_scale_doubles_until_active_dimensions_are_met() {
+        assert_eq!(minimum_input_scale(300, 300, 512, 512).unwrap(), 2);
+        assert_eq!(minimum_input_scale(128, 512, 512, 512).unwrap(), 4);
+        assert_eq!(minimum_input_scale(64, 20, 0, 512).unwrap(), 32);
+        assert_eq!(minimum_input_scale(64, 20, 0, 0).unwrap(), 1);
+    }
+
+    #[test]
+    fn minimum_input_size_upscales_with_nearest_neighbor_before_detection() {
+        let mut image = RawImage::transparent(2, 3);
+        image.set_pixel(1, 2, [10, 20, 30, 255]);
+        let mut options = TransformOptions {
+            pixel_width: Some(1),
+            min_input_width: 3,
+            min_input_height: 5,
+            ..TransformOptions::default()
+        };
+
+        let prepared = prepare_image(image.clone(), &options).unwrap();
+
+        assert_eq!((prepared.decoded.width, prepared.decoded.height), (4, 6));
+        assert_eq!(prepared.decoded.pixel(2, 4), [10, 20, 30, 255]);
+
+        options.min_input_width = 0;
+        options.min_input_height = 0;
+        let prepared = prepare_image(image, &options).unwrap();
+
+        assert_eq!((prepared.decoded.width, prepared.decoded.height), (2, 3));
+    }
+
+    #[test]
+    fn minimum_input_size_scales_manual_pixel_width() {
+        let image = RawImage::transparent(4, 4);
+        let options = TransformOptions {
+            pixel_width: Some(2),
+            min_input_width: 8,
+            min_input_height: 8,
+            ..TransformOptions::default()
+        };
+
+        let prepared = prepare_image(image, &options).unwrap();
+
+        assert_eq!((prepared.decoded.width, prepared.decoded.height), (8, 8));
+        assert_eq!(prepared.mesh.detected_pixel_width, 4);
+        assert_eq!(prepared.mesh.mesh.lines_x, vec![0, 4, 7]);
+        assert_eq!(prepared.mesh.mesh.lines_y, vec![0, 4, 7]);
+    }
+
+    #[test]
     fn rejects_invalid_warp_subdivision_options() {
         let mut options = TransformOptions::default();
+        options.edge_close_kernel_size = 4;
+        assert!(
+            validate_options(&options)
+                .unwrap_err()
+                .to_string()
+                .contains("edge-close-kernel-size")
+        );
+
+        options.edge_close_kernel_size = DEFAULT_EDGE_CLOSE_KERNEL_SIZE;
         options.warp_subdivision_depth = MAX_WARP_SUBDIVISION_DEPTH + 1;
         assert!(
             validate_options(&options)

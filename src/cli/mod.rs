@@ -7,7 +7,8 @@ use clap::Parser;
 use rayon::prelude::*;
 
 use crate::core::{
-    ArtifactOptions, ColorMode, DownscaleSampleFrom, OutputFormat, PaletteStrategy,
+    ArtifactOptions, ColorMode, DEFAULT_EDGE_CLOSE_KERNEL_SIZE, DEFAULT_MIN_INPUT_HEIGHT,
+    DEFAULT_MIN_INPUT_WIDTH, DownscaleSampleFrom, OutputFormat, PaletteStrategy,
     PixelWidthDetector, Size, TransformOptions, transform_bytes, write_image_file,
 };
 use crate::mesh::{DEFAULT_WARP_SUBDIVISION_DEPTH, DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD};
@@ -57,6 +58,8 @@ pub struct CliArgs {
     pub downscale_sample_from: String,
     #[arg(short = 't', long = "transparent")]
     pub transparent: bool,
+    #[arg(long = "edge-close-kernel-size", default_value_t = DEFAULT_EDGE_CLOSE_KERNEL_SIZE)]
+    pub edge_close_kernel_size: u32,
     #[arg(long = "crop")]
     pub crop: bool,
     #[arg(long = "crop-size")]
@@ -67,6 +70,10 @@ pub struct CliArgs {
     pub pixel_width_detector: String,
     #[arg(short = 'u', long = "initial-upscale", default_value = "2")]
     pub initial_upscale: u32,
+    #[arg(long = "min-input-width", default_value_t = DEFAULT_MIN_INPUT_WIDTH)]
+    pub min_input_width: u32,
+    #[arg(long = "min-input-height", default_value_t = DEFAULT_MIN_INPUT_HEIGHT)]
+    pub min_input_height: u32,
     #[arg(
         long = "warp-subdivision-depth",
         default_value_t = DEFAULT_WARP_SUBDIVISION_DEPTH
@@ -256,6 +263,7 @@ pub fn parse_cli(args: CliArgs) -> Result<ParsedCli> {
             .transpose()?,
         downscale_sample_from: parse_downscale_sample_from(&args.downscale_sample_from)?,
         transparent_background: args.transparent,
+        edge_close_kernel_size: args.edge_close_kernel_size,
         crop: args.crop,
         crop_size: args
             .crop_size
@@ -268,6 +276,8 @@ pub fn parse_cli(args: CliArgs) -> Result<ParsedCli> {
             .transpose()?,
         pixel_width_detector: parse_pixel_width_detector(&args.pixel_width_detector)?,
         initial_upscale: positive(args.initial_upscale, "initial-upscale")?,
+        min_input_width: args.min_input_width,
+        min_input_height: args.min_input_height,
         warp_subdivision_depth: args.warp_subdivision_depth,
         warp_subdivision_edge_threshold: args.warp_subdivision_edge_threshold,
         artifacts: ArtifactOptions {
@@ -739,6 +749,12 @@ mod tests {
             "32x32",
             "--downscale-sample-from",
             "original",
+            "--edge-close-kernel-size",
+            "5",
+            "--min-input-width",
+            "0",
+            "--min-input-height",
+            "768",
             "--crop",
             "--crop-size",
             "32x128",
@@ -778,6 +794,9 @@ mod tests {
             parsed.transform.downscale_sample_from,
             DownscaleSampleFrom::Original
         );
+        assert_eq!(parsed.transform.edge_close_kernel_size, 5);
+        assert_eq!(parsed.transform.min_input_width, 0);
+        assert_eq!(parsed.transform.min_input_height, 768);
         assert!(parsed.transform.crop);
         assert_eq!(
             parsed.transform.crop_size,

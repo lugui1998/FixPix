@@ -60,11 +60,14 @@ struct ManifestOptions {
     downscale: Option<ManifestSize>,
     downscale_sample_from: Option<String>,
     transparent_background: Option<bool>,
+    edge_close_kernel_size: Option<u32>,
     crop: Option<bool>,
     crop_size: Option<ManifestSize>,
     pixel_width: Option<u32>,
     pixel_width_detector: Option<String>,
     initial_upscale: Option<u32>,
+    min_input_width: Option<u32>,
+    min_input_height: Option<u32>,
     warp_subdivision_depth: Option<u32>,
     warp_subdivision_edge_threshold: Option<f32>,
     artifacts: Option<ManifestArtifacts>,
@@ -318,6 +321,9 @@ fn manifest_options_to_transform(options: &ManifestOptions) -> Result<TransformO
         };
     }
     transform.transparent_background = options.transparent_background.unwrap_or(false);
+    if let Some(value) = options.edge_close_kernel_size {
+        transform.edge_close_kernel_size = value;
+    }
     transform.crop = options.crop.unwrap_or(false);
     transform.crop_size = options.crop_size.map(size);
     transform.pixel_width = options.pixel_width;
@@ -331,6 +337,12 @@ fn manifest_options_to_transform(options: &ManifestOptions) -> Result<TransformO
     }
     if let Some(value) = options.initial_upscale {
         transform.initial_upscale = value;
+    }
+    if let Some(value) = options.min_input_width {
+        transform.min_input_width = value;
+    }
+    if let Some(value) = options.min_input_height {
+        transform.min_input_height = value;
     }
     if let Some(value) = options.warp_subdivision_depth {
         transform.warp_subdivision_depth = value;

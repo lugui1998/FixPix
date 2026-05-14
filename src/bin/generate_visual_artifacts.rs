@@ -65,6 +65,8 @@ struct ManifestOptions {
     pixel_width: Option<u32>,
     pixel_width_detector: Option<String>,
     initial_upscale: Option<u32>,
+    warp_subdivision_depth: Option<u32>,
+    warp_subdivision_edge_threshold: Option<f32>,
     artifacts: Option<ManifestArtifacts>,
     output: Option<ManifestOutput>,
 }
@@ -329,6 +331,12 @@ fn manifest_options_to_transform(options: &ManifestOptions) -> Result<TransformO
     }
     if let Some(value) = options.initial_upscale {
         transform.initial_upscale = value;
+    }
+    if let Some(value) = options.warp_subdivision_depth {
+        transform.warp_subdivision_depth = value;
+    }
+    if let Some(value) = options.warp_subdivision_edge_threshold {
+        transform.warp_subdivision_edge_threshold = value;
     }
     if let Some(artifacts) = &options.artifacts {
         transform.artifacts = ArtifactOptions {

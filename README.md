@@ -120,12 +120,14 @@ fixpix ./input.png --pixel-width 8
 | `-w, --pixel-width <n>` | positive integer | automatic detection | Forces a known source pixel width. |
 | `--pixel-width-detector <projection\|hough\|hybrid>` | enum | `hybrid` | Selects automatic pixel-width detection strategy. |
 | `-u, --initial-upscale <n>` | positive integer | `2` | Upscale factor used before mesh detection. Higher values can help small inputs but cost more CPU time. |
+| `--warp-subdivision-depth <n>` | integer `0-4` | `1` | Maximum internal warp sampling subdivision depth. `0` disables subdivision; higher values can follow bent pixel boundaries but may overfit. |
+| `--warp-subdivision-edge-threshold <n>` | number | `18` | Minimum local edge strength required before an internal warp subdivision point can move. Higher values ignore weaker texture/artifact edges. |
 | `-f, --format <png\|jpeg\|webp>` | enum | inferred or `png` | Output format. If omitted, inferred from output path, URL extension, or defaults to PNG. |
 | `-q, --quality <1-100>` | integer | encoder default | JPEG quality. PNG ignores this option. WebP quality is currently rejected because WebP output uses the lossless encoder. |
 | `--url-timeout-ms <n>` | positive integer | `30000` | Timeout for URL input downloads, in milliseconds. |
 | `--url-max-bytes <n>` | positive integer | `52428800` | Maximum URL input size in bytes. Checked against `Content-Length` when available and while reading the response. |
 | `--url-content-types <list>` | comma-separated MIME list | `image/*,application/octet-stream` | Allowed URL response content types. Exact types and wildcards such as `image/*` are supported. |
-| `--debug-out <path>` | path | none | Writes a combined debug sheet with source preview, edge preview, line overlays, grid overlay, magnified final image, natural-size unscaled image, and palette. |
+| `--debug-out <path>` | path | none | Writes a combined debug sheet with source preview, edge preview, line overlays, grid overlay, final image, and palette. Transparent-background runs put background mask and sampled mask coverage panels on their own row. |
 | `--debug-scale <n>` | positive integer | `6` | Scale used for debug sheet previews. |
 | `--unscaled-out <path>` | path | none | Writes the unscaled cleaned sprite before final output scaling. |
 | `--palette-out <path>` | path | none | Writes a palette swatch image. |

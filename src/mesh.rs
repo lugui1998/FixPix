@@ -15,6 +15,10 @@ const DEBUG_PALETTE_MAX_WIDTH_RATIO: f32 = 0.36;
 const DEBUG_PALETTE_MAX_HEIGHT_RATIO: f32 = 0.24;
 const DEBUG_GRID_COLOR: [u8; 4] = [255, 0, 0, 255];
 const DEBUG_UNWARPED_GRID_COLOR: [u8; 4] = [80, 200, 255, 255];
+const DEBUG_BACKGROUND_MASK_COLOR: [u8; 4] = [0, 190, 255, 255];
+const DEBUG_BACKGROUND_COVERAGE_STRONG_COLOR: [u8; 4] = [0, 210, 255, 255];
+const DEBUG_BACKGROUND_COVERAGE_MEDIUM_COLOR: [u8; 4] = [255, 170, 0, 255];
+const DEBUG_BACKGROUND_COVERAGE_WEAK_COLOR: [u8; 4] = [255, 0, 90, 255];
 const BACKGROUND_TRANSPARENT_COVERAGE: u8 = 153;
 const BACKGROUND_FRINGE_MIN_COVERAGE: u8 = 64;
 const SAMPLED_BACKGROUND_FRINGE_DISTANCE_LIMIT: i32 = 2500;
@@ -29,7 +33,9 @@ const LOCAL_EDGE_STRONG_CONFIDENCE: f32 = 0.42;
 const LOCAL_EDGE_WEAK_CONFIDENCE: f32 = 0.18;
 const LOCAL_EDGE_CORNER_BONUS: f32 = 0.75;
 const LOCAL_EDGE_WARP_MIN_ERROR_GAIN: f32 = 0.1;
-const WARP_SUBDIVISION_MIN_EDGE_SCORE: f32 = 18.0;
+pub const DEFAULT_WARP_SUBDIVISION_DEPTH: u32 = 1;
+pub const DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD: f32 = 18.0;
+pub const MAX_WARP_SUBDIVISION_DEPTH: u32 = 4;
 const WARP_SUBDIVISION_MIN_EDGE_GAIN: f32 = 1.12;
 const WARP_SUBDIVISION_MAX_RADIUS: u32 = 5;
 const WARP_SAMPLE_COLOR_CAPACITY: usize = 1024;
@@ -47,6 +53,21 @@ pub struct Mesh {
 pub struct MeshWarp {
     pub lines_x_by_row: Vec<Vec<u32>>,
     pub lines_y_by_column: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WarpSubdivisionOptions {
+    pub max_depth: u32,
+    pub edge_threshold: f32,
+}
+
+impl Default for WarpSubdivisionOptions {
+    fn default() -> Self {
+        Self {
+            max_depth: DEFAULT_WARP_SUBDIVISION_DEPTH,
+            edge_threshold: DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +300,22 @@ pub fn sample_cells(
     sample_grid: u32,
     transparent_background: bool,
 ) -> RawImage {
+    sample_cells_with_warp_options(
+        image,
+        mesh,
+        sample_grid,
+        transparent_background,
+        WarpSubdivisionOptions::default(),
+    )
+}
+
+pub fn sample_cells_with_warp_options(
+    image: &RawImage,
+    mesh: &Mesh,
+    sample_grid: u32,
+    transparent_background: bool,
+    warp_options: WarpSubdivisionOptions,
+) -> RawImage {
     let background = transparent_background
         .then(|| boundary_background_color(image))
         .flatten();
@@ -306,6 +343,7 @@ pub fn sample_cells(
                     x as usize,
                     y as usize,
                     sample_grid,
+                    warp_options,
                 )
             } else {
                 let (x0, x1, y0, y1) =
@@ -353,6 +391,7 @@ fn sample_warped_cell(
     cell_x: usize,
     cell_y: usize,
     sample_grid: u32,
+    warp_options: WarpSubdivisionOptions,
 ) -> SampledCell {
     let Some(corners) = warped_cell_corners(mesh, cell_x, cell_y) else {
         let (x0, x1, y0, y1) = mesh_cell_bounds(mesh, cell_x, cell_y, image);
@@ -364,7 +403,7 @@ fn sample_warped_cell(
         };
     };
 
-    let subdivision = subdivided_warped_cell_grid(image, corners);
+    let subdivision = subdivided_warped_cell_grid_with_options(image, corners, warp_options);
     let grid = sample_grid.max(1);
     let center = subdivided_warp_point(&subdivision, 0.5, 0.5);
     let mut keys = [0u32; WARP_SAMPLE_COLOR_CAPACITY];
@@ -618,60 +657,84 @@ fn bilinear_point(corners: WarpedCellCorners, u: f32, v: f32) -> (f32, f32) {
     )
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct WarpedCellSubgrid {
-    points: [[(f32, f32); 3]; 3],
+    points: Vec<Vec<(f32, f32)>>,
 }
 
+#[cfg(test)]
 fn subdivided_warped_cell_grid(image: &RawImage, corners: WarpedCellCorners) -> WarpedCellSubgrid {
-    let mut points = [[(0.0, 0.0); 3]; 3];
-    points[0][0] = corners.top_left;
-    points[0][2] = corners.top_right;
-    points[2][0] = corners.bottom_left;
-    points[2][2] = corners.bottom_right;
-    points[0][1] = refine_horizontal_subdivision_point(
+    subdivided_warped_cell_grid_with_options(image, corners, WarpSubdivisionOptions::default())
+}
+
+fn subdivided_warped_cell_grid_with_options(
+    image: &RawImage,
+    corners: WarpedCellCorners,
+    options: WarpSubdivisionOptions,
+) -> WarpedCellSubgrid {
+    let depth = options.max_depth.min(MAX_WARP_SUBDIVISION_DEPTH);
+    let segments = 1usize << depth;
+    let threshold = options.edge_threshold.max(0.0);
+    let top = refined_horizontal_edge_points(
         image,
-        midpoint(corners.top_left, corners.top_right),
         corners.top_left,
         corners.top_right,
+        segments,
+        threshold,
     );
-    points[2][1] = refine_horizontal_subdivision_point(
+    let bottom = refined_horizontal_edge_points(
         image,
-        midpoint(corners.bottom_left, corners.bottom_right),
         corners.bottom_left,
         corners.bottom_right,
+        segments,
+        threshold,
     );
-    points[1][0] = refine_vertical_subdivision_point(
+    let left = refined_vertical_edge_points(
         image,
-        midpoint(corners.top_left, corners.bottom_left),
         corners.top_left,
         corners.bottom_left,
+        segments,
+        threshold,
     );
-    points[1][2] = refine_vertical_subdivision_point(
+    let right = refined_vertical_edge_points(
         image,
-        midpoint(corners.top_right, corners.bottom_right),
         corners.top_right,
         corners.bottom_right,
+        segments,
+        threshold,
     );
-    let center = bilinear_point(corners, 0.5, 0.5);
-    let edge_center = (
-        (points[0][1].0 + points[2][1].0 + points[1][0].0 + points[1][2].0) / 4.0,
-        (points[0][1].1 + points[2][1].1 + points[1][0].1 + points[1][2].1) / 4.0,
-    );
-    points[1][1] = (
-        center.0 * 0.5 + edge_center.0 * 0.5,
-        center.1 * 0.5 + edge_center.1 * 0.5,
-    );
+
+    let mut points = vec![vec![(0.0, 0.0); segments + 1]; segments + 1];
+    for y in 0..=segments {
+        let v = y as f32 / segments as f32;
+        for x in 0..=segments {
+            let u = x as f32 / segments as f32;
+            points[y][x] = if y == 0 {
+                top[x]
+            } else if y == segments {
+                bottom[x]
+            } else if x == 0 {
+                left[y]
+            } else if x == segments {
+                right[y]
+            } else {
+                coons_patch_point(corners, top[x], bottom[x], left[y], right[y], u, v)
+            };
+        }
+    }
     WarpedCellSubgrid { points }
 }
 
 fn subdivided_warp_point(subdivision: &WarpedCellSubgrid, u: f32, v: f32) -> (f32, f32) {
     let u = u.clamp(0.0, 1.0);
     let v = v.clamp(0.0, 1.0);
-    let sub_x = if u < 0.5 { 0 } else { 1 };
-    let sub_y = if v < 0.5 { 0 } else { 1 };
-    let local_u = if sub_x == 0 { u * 2.0 } else { u * 2.0 - 1.0 };
-    let local_v = if sub_y == 0 { v * 2.0 } else { v * 2.0 - 1.0 };
+    let segments = subdivision.points.len().saturating_sub(1).max(1);
+    let scaled_u = u * segments as f32;
+    let scaled_v = v * segments as f32;
+    let sub_x = (scaled_u.floor() as usize).min(segments - 1);
+    let sub_y = (scaled_v.floor() as usize).min(segments - 1);
+    let local_u = scaled_u - sub_x as f32;
+    let local_v = scaled_v - sub_y as f32;
     bilinear_tuple_point(
         subdivision.points[sub_y][sub_x],
         subdivision.points[sub_y][sub_x + 1],
@@ -700,11 +763,119 @@ fn bilinear_tuple_point(
     )
 }
 
+fn coons_patch_point(
+    corners: WarpedCellCorners,
+    top: (f32, f32),
+    bottom: (f32, f32),
+    left: (f32, f32),
+    right: (f32, f32),
+    u: f32,
+    v: f32,
+) -> (f32, f32) {
+    let horizontal = (
+        left.0 * (1.0 - u) + right.0 * u,
+        left.1 * (1.0 - u) + right.1 * u,
+    );
+    let vertical = (
+        top.0 * (1.0 - v) + bottom.0 * v,
+        top.1 * (1.0 - v) + bottom.1 * v,
+    );
+    let corner_blend = bilinear_point(corners, u, v);
+    (
+        horizontal.0 + vertical.0 - corner_blend.0,
+        horizontal.1 + vertical.1 - corner_blend.1,
+    )
+}
+
+fn refined_horizontal_edge_points(
+    image: &RawImage,
+    start: (f32, f32),
+    end: (f32, f32),
+    segments: usize,
+    edge_threshold: f32,
+) -> Vec<(f32, f32)> {
+    let mut points = (0..=segments)
+        .map(|index| {
+            let u = index as f32 / segments as f32;
+            (
+                start.0 * (1.0 - u) + end.0 * u,
+                start.1 * (1.0 - u) + end.1 * u,
+            )
+        })
+        .collect::<Vec<_>>();
+    refine_horizontal_edge_segment(image, &mut points, 0, segments, edge_threshold);
+    points
+}
+
+fn refine_horizontal_edge_segment(
+    image: &RawImage,
+    points: &mut [(f32, f32)],
+    start_index: usize,
+    end_index: usize,
+    edge_threshold: f32,
+) {
+    if end_index.saturating_sub(start_index) <= 1 {
+        return;
+    }
+    let mid_index = (start_index + end_index) / 2;
+    let start = points[start_index];
+    let end = points[end_index];
+    points[mid_index] = refine_horizontal_subdivision_point(
+        image,
+        midpoint(start, end),
+        start,
+        end,
+        edge_threshold,
+    );
+    refine_horizontal_edge_segment(image, points, start_index, mid_index, edge_threshold);
+    refine_horizontal_edge_segment(image, points, mid_index, end_index, edge_threshold);
+}
+
+fn refined_vertical_edge_points(
+    image: &RawImage,
+    start: (f32, f32),
+    end: (f32, f32),
+    segments: usize,
+    edge_threshold: f32,
+) -> Vec<(f32, f32)> {
+    let mut points = (0..=segments)
+        .map(|index| {
+            let v = index as f32 / segments as f32;
+            (
+                start.0 * (1.0 - v) + end.0 * v,
+                start.1 * (1.0 - v) + end.1 * v,
+            )
+        })
+        .collect::<Vec<_>>();
+    refine_vertical_edge_segment(image, &mut points, 0, segments, edge_threshold);
+    points
+}
+
+fn refine_vertical_edge_segment(
+    image: &RawImage,
+    points: &mut [(f32, f32)],
+    start_index: usize,
+    end_index: usize,
+    edge_threshold: f32,
+) {
+    if end_index.saturating_sub(start_index) <= 1 {
+        return;
+    }
+    let mid_index = (start_index + end_index) / 2;
+    let start = points[start_index];
+    let end = points[end_index];
+    points[mid_index] =
+        refine_vertical_subdivision_point(image, midpoint(start, end), start, end, edge_threshold);
+    refine_vertical_edge_segment(image, points, start_index, mid_index, edge_threshold);
+    refine_vertical_edge_segment(image, points, mid_index, end_index, edge_threshold);
+}
+
 fn refine_horizontal_subdivision_point(
     image: &RawImage,
     point: (f32, f32),
     start: (f32, f32),
     end: (f32, f32),
+    edge_threshold: f32,
 ) -> (f32, f32) {
     let radius = subdivision_search_radius(start, end);
     let original = point.1.round() as i32;
@@ -726,7 +897,7 @@ fn refine_horizontal_subdivision_point(
             best_y = y;
         }
     }
-    let Some(weight) = subdivision_snap_weight(base_score, best_score) else {
+    let Some(weight) = subdivision_snap_weight(base_score, best_score, edge_threshold) else {
         return point;
     };
     (point.0, point.1 * (1.0 - weight) + best_y as f32 * weight)
@@ -737,6 +908,7 @@ fn refine_vertical_subdivision_point(
     point: (f32, f32),
     start: (f32, f32),
     end: (f32, f32),
+    edge_threshold: f32,
 ) -> (f32, f32) {
     let radius = subdivision_search_radius(start, end);
     let original = point.0.round() as i32;
@@ -758,7 +930,7 @@ fn refine_vertical_subdivision_point(
             best_x = x;
         }
     }
-    let Some(weight) = subdivision_snap_weight(base_score, best_score) else {
+    let Some(weight) = subdivision_snap_weight(base_score, best_score, edge_threshold) else {
         return point;
     };
     (point.0 * (1.0 - weight) + best_x as f32 * weight, point.1)
@@ -769,8 +941,8 @@ fn subdivision_search_radius(start: (f32, f32), end: (f32, f32)) -> u32 {
     ((span * 0.25).round() as u32).clamp(2, WARP_SUBDIVISION_MAX_RADIUS)
 }
 
-fn subdivision_snap_weight(base_score: f32, best_score: f32) -> Option<f32> {
-    if best_score < WARP_SUBDIVISION_MIN_EDGE_SCORE {
+fn subdivision_snap_weight(base_score: f32, best_score: f32, edge_threshold: f32) -> Option<f32> {
+    if best_score < edge_threshold {
         return None;
     }
     if best_score < (base_score * WARP_SUBDIVISION_MIN_EDGE_GAIN).max(base_score + 2.0) {
@@ -1368,17 +1540,51 @@ pub fn create_debug_sheet(
     debug_scale: u32,
     _palette_merge_threshold: f32,
 ) -> RawImage {
+    create_debug_sheet_with_options(
+        original,
+        unscaled,
+        mesh,
+        palette_colors,
+        DebugSheetOptions {
+            debug_scale,
+            palette_merge_threshold: _palette_merge_threshold,
+            transparent_background: false,
+            sample_grid: 5,
+            warp_subdivision: WarpSubdivisionOptions::default(),
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DebugSheetOptions {
+    pub debug_scale: u32,
+    pub palette_merge_threshold: f32,
+    pub transparent_background: bool,
+    pub sample_grid: u32,
+    pub warp_subdivision: WarpSubdivisionOptions,
+}
+
+pub fn create_debug_sheet_with_options(
+    original: &RawImage,
+    unscaled: &RawImage,
+    mesh: &MeshResult,
+    palette_colors: &[[u8; 3]],
+    options: DebugSheetOptions,
+) -> RawImage {
     let detection_image = if mesh.scale_used > 1 {
         scale_nearest(original, mesh.scale_used)
     } else {
         original.clone()
     };
-    let preview_scale = limit_scale_for_max_dimension(&detection_image, debug_scale.max(1));
+    let preview_scale = limit_scale_for_max_dimension(&detection_image, options.debug_scale.max(1));
     let debug_display_multiplier = mesh.scale_used.max(1) * preview_scale;
     let edge_source = crop_debug_detection_image(&detection_image, mesh.debug_crop_offset);
 
     let original_preview = scale_nearest(original, debug_display_multiplier);
     let enlarged_detection_image = scale_nearest(&detection_image, preview_scale);
+    let transparency_mask_preview =
+        create_background_mask_preview(&detection_image, options.transparent_background)
+            .map(|preview| scale_nearest(&preview, preview_scale));
     let canny_mask = create_edge_preview(&edge_source);
     let canny_preview = scale_nearest(&canny_mask, preview_scale);
     let hough_preview = draw_detection_line_overlay(
@@ -1389,21 +1595,168 @@ pub fn create_debug_sheet(
     );
     let hough_preview = draw_anchor_overlay(&hough_preview, mesh, preview_scale);
     let grid_preview = draw_grid_overlay(&enlarged_detection_image, mesh, preview_scale);
-    let unscaled_preview = unscaled.clone();
     let mut final_preview = scale_nearest(unscaled, debug_display_multiplier);
+    let sampled_background_coverage_preview = create_sampled_background_coverage_preview(
+        original,
+        &mesh.mesh,
+        options.transparent_background,
+        options.sample_grid,
+        options.warp_subdivision,
+    );
 
     let final_preview_scale =
         choose_closest_integer_scale(&final_preview, grid_preview.width, grid_preview.height);
     if final_preview_scale > 1 {
         final_preview = scale_nearest(&final_preview, final_preview_scale);
     }
+    let sampled_background_coverage_preview = sampled_background_coverage_preview.map(|preview| {
+        let preview = scale_nearest(&preview, debug_display_multiplier);
+        if final_preview_scale > 1 {
+            scale_nearest(&preview, final_preview_scale)
+        } else {
+            preview
+        }
+    });
     let palette_preview =
         create_debug_palette_preview(palette_colors, final_preview.width, final_preview.height);
 
-    compose_debug_rows(&[
-        &[original_preview, canny_preview, hough_preview, grid_preview],
-        &[final_preview, unscaled_preview, palette_preview],
-    ])
+    let top_row = vec![original_preview, canny_preview, hough_preview, grid_preview];
+    let mut mask_row = Vec::new();
+    if let Some(preview) = transparency_mask_preview {
+        mask_row.push(preview);
+    }
+    if let Some(preview) = sampled_background_coverage_preview {
+        mask_row.push(preview);
+    }
+
+    let output_row = vec![final_preview, palette_preview];
+    let mut rows = vec![top_row.as_slice()];
+    if !mask_row.is_empty() {
+        rows.push(mask_row.as_slice());
+    }
+    rows.push(output_row.as_slice());
+    compose_debug_rows(&rows)
+}
+
+fn create_background_mask_preview(image: &RawImage, enabled: bool) -> Option<RawImage> {
+    if !enabled {
+        return None;
+    }
+    let background = boundary_background_color(image)?;
+    let mask = boundary_background_mask_with_color(image, &background);
+    Some(render_background_mask_preview(image, &mask))
+}
+
+fn render_background_mask_preview(image: &RawImage, mask: &BackgroundMask) -> RawImage {
+    debug_assert_eq!((image.width, image.height), (mask.width, mask.height));
+    let mut out = RawImage::transparent(image.width, image.height);
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let pixel = image.pixel(x, y);
+            let color = if mask.is_background(x, y) {
+                DEBUG_BACKGROUND_MASK_COLOR
+            } else if pixel[3] < ALPHA_THRESHOLD {
+                [32, 32, 32, 255]
+            } else {
+                [
+                    ((pixel[0] as u16 * 2) / 5) as u8,
+                    ((pixel[1] as u16 * 2) / 5) as u8,
+                    ((pixel[2] as u16 * 2) / 5) as u8,
+                    255,
+                ]
+            };
+            out.set_pixel(x, y, color);
+        }
+    }
+    out
+}
+
+fn create_sampled_background_coverage_preview(
+    image: &RawImage,
+    mesh: &Mesh,
+    enabled: bool,
+    sample_grid: u32,
+    warp_options: WarpSubdivisionOptions,
+) -> Option<RawImage> {
+    if !enabled {
+        return None;
+    }
+    let background = boundary_background_color(image)?;
+    let mask = boundary_background_mask_with_color(image, &background);
+    let width = mesh.lines_x.len().saturating_sub(1) as u32;
+    let height = mesh.lines_y.len().saturating_sub(1) as u32;
+    let colors = (0..width as usize * height as usize)
+        .into_par_iter()
+        .map(|index| {
+            let x = index as u32 % width;
+            let y = index as u32 / width;
+            let coverage = sampled_background_coverage_for_cell(
+                image,
+                &mask,
+                mesh,
+                x as usize,
+                y as usize,
+                sample_grid,
+                warp_options,
+            );
+            debug_background_coverage_color(coverage)
+        })
+        .collect::<Vec<_>>();
+    let mut pixels = Vec::with_capacity(colors.len() * 4);
+    for color in colors {
+        pixels.extend_from_slice(&color);
+    }
+    Some(RawImage::new(width, height, pixels))
+}
+
+fn sampled_background_coverage_for_cell(
+    image: &RawImage,
+    mask: &BackgroundMask,
+    mesh: &Mesh,
+    cell_x: usize,
+    cell_y: usize,
+    sample_grid: u32,
+    warp_options: WarpSubdivisionOptions,
+) -> u8 {
+    let Some(corners) = warped_cell_corners(mesh, cell_x, cell_y) else {
+        let (x0, x1, y0, y1) = mesh_cell_bounds(mesh, cell_x, cell_y, image);
+        return background_coverage_for_bounds(mask, x0, x1, y0, y1);
+    };
+
+    let subdivision = subdivided_warped_cell_grid_with_options(image, corners, warp_options);
+    let grid = sample_grid.max(1);
+    let mut background = 0u32;
+    let mut total = 0u32;
+    for sample_y in 0..grid {
+        let v = (sample_y as f32 + 0.5) / grid as f32;
+        for sample_x in 0..grid {
+            let u = (sample_x as f32 + 0.5) / grid as f32;
+            let point = subdivided_warp_point(&subdivision, u, v);
+            let x = point
+                .0
+                .round()
+                .clamp(0.0, image.width.saturating_sub(1) as f32) as u32;
+            let y = point
+                .1
+                .round()
+                .clamp(0.0, image.height.saturating_sub(1) as f32) as u32;
+            total += 1;
+            background += u32::from(mask.is_background(x, y));
+        }
+    }
+    coverage_to_u8(background, total)
+}
+
+fn debug_background_coverage_color(coverage: u8) -> [u8; 4] {
+    if coverage >= BACKGROUND_TRANSPARENT_COVERAGE {
+        DEBUG_BACKGROUND_COVERAGE_STRONG_COLOR
+    } else if coverage >= BACKGROUND_FRINGE_MIN_COVERAGE {
+        DEBUG_BACKGROUND_COVERAGE_MEDIUM_COLOR
+    } else if coverage > 0 {
+        DEBUG_BACKGROUND_COVERAGE_WEAK_COLOR
+    } else {
+        [0, 0, 0, 255]
+    }
 }
 
 fn create_debug_palette_preview(
@@ -2150,6 +2503,26 @@ mod tests {
         )
     }
 
+    fn color_bounds(image: &RawImage, color: [u8; 4]) -> Option<(u32, u32, u32, u32)> {
+        let mut left = image.width;
+        let mut top = image.height;
+        let mut right = 0;
+        let mut bottom = 0;
+        let mut found = false;
+        for y in 0..image.height {
+            for x in 0..image.width {
+                if image.pixel(x, y) == color {
+                    left = left.min(x);
+                    top = top.min(y);
+                    right = right.max(x);
+                    bottom = bottom.max(y);
+                    found = true;
+                }
+            }
+        }
+        found.then_some((left, top, right, bottom))
+    }
+
     #[test]
     fn debug_sheet_places_final_and_palette_on_second_row() {
         let debug = create_debug_sheet(
@@ -2181,7 +2554,69 @@ mod tests {
     }
 
     #[test]
-    fn debug_sheet_includes_unscaled_output_at_natural_size() {
+    fn transparency_debug_sheet_includes_background_mask_panels() {
+        let black = [0, 0, 0, 255];
+        let red = [255, 0, 0, 255];
+        let final_color = [17, 33, 51, 255];
+        let mut data = Vec::new();
+        for y in 0..3 {
+            for x in 0..3 {
+                data.extend_from_slice(if x == 1 && y == 1 { &red } else { &black });
+            }
+        }
+        let original = RawImage::new(3, 3, data);
+        let mesh = MeshResult {
+            mesh: Mesh::regular(3, 3, 1),
+            detected_pixel_width: 1,
+            pixel_width_source: PixelWidthSource::Manual,
+            scale_used: 1,
+            debug_crop_offset: (0, 0),
+            debug_anchor_lines_x: None,
+            debug_anchor_lines_y: None,
+        };
+
+        let debug = create_debug_sheet_with_options(
+            &original,
+            &RawImage::new(
+                2,
+                2,
+                [final_color, final_color, final_color, final_color].concat(),
+            ),
+            &mesh,
+            &[[255, 0, 0], [0, 255, 0]],
+            DebugSheetOptions {
+                debug_scale: 1,
+                palette_merge_threshold: 1.0,
+                transparent_background: true,
+                sample_grid: 1,
+                warp_subdivision: WarpSubdivisionOptions::default(),
+            },
+        );
+
+        assert!(
+            debug
+                .data
+                .chunks_exact(4)
+                .any(|pixel| pixel == &DEBUG_BACKGROUND_MASK_COLOR[..])
+        );
+        assert!(
+            debug
+                .data
+                .chunks_exact(4)
+                .any(|pixel| pixel == &DEBUG_BACKGROUND_COVERAGE_STRONG_COLOR[..])
+        );
+
+        let mask_bounds = color_bounds(&debug, DEBUG_BACKGROUND_MASK_COLOR).unwrap();
+        let coverage_bounds = color_bounds(&debug, DEBUG_BACKGROUND_COVERAGE_STRONG_COLOR).unwrap();
+        let final_bounds = color_bounds(&debug, final_color).unwrap();
+        let palette_bounds = color_bounds(&debug, [0, 255, 0, 255]).unwrap();
+        assert!(final_bounds.1 > mask_bounds.3);
+        assert!(final_bounds.1 > coverage_bounds.3);
+        assert!(palette_bounds.0 > final_bounds.2);
+    }
+
+    #[test]
+    fn debug_sheet_includes_final_output_without_unscaled_duplicate() {
         let output_color = [17, 33, 51, 255];
         let debug = create_debug_sheet(
             &tiny_original(),
@@ -2197,7 +2632,7 @@ mod tests {
             .chunks_exact(4)
             .filter(|pixel| *pixel == output_color)
             .count();
-        assert_eq!(output_pixels, 5);
+        assert_eq!(output_pixels, 4);
     }
 
     #[test]
@@ -2389,6 +2824,93 @@ mod tests {
             DEBUG_GRID_COLOR
         );
         assert_eq!(overlay.pixel(3, 3), DEBUG_GRID_COLOR);
+    }
+
+    #[test]
+    fn warp_subdivision_depth_zero_uses_unsubdivided_cell() {
+        let mut image = RawImage::transparent(9, 9);
+        for y in 0..9 {
+            for x in 0..9 {
+                let value = if y < 2 { 0 } else { 255 };
+                image.set_pixel(x, y, [value, value, value, 255]);
+            }
+        }
+        let corners = WarpedCellCorners {
+            top_left: (0.0, 4.0),
+            top_right: (8.0, 4.0),
+            bottom_left: (0.0, 8.0),
+            bottom_right: (8.0, 8.0),
+        };
+
+        let subdivision = subdivided_warped_cell_grid_with_options(
+            &image,
+            corners,
+            WarpSubdivisionOptions {
+                max_depth: 0,
+                edge_threshold: 1.0,
+            },
+        );
+
+        assert_eq!(subdivision.points.len(), 2);
+        assert_eq!(subdivided_warp_point(&subdivision, 0.5, 0.0), (4.0, 4.0));
+    }
+
+    #[test]
+    fn warp_subdivision_depth_two_refines_quarter_edge_points() {
+        let mut image = RawImage::transparent(9, 9);
+        for y in 0..9 {
+            for x in 0..9 {
+                let value = if y < 2 { 0 } else { 255 };
+                image.set_pixel(x, y, [value, value, value, 255]);
+            }
+        }
+        let corners = WarpedCellCorners {
+            top_left: (0.0, 4.0),
+            top_right: (8.0, 4.0),
+            bottom_left: (0.0, 8.0),
+            bottom_right: (8.0, 8.0),
+        };
+
+        let subdivision = subdivided_warped_cell_grid_with_options(
+            &image,
+            corners,
+            WarpSubdivisionOptions {
+                max_depth: 2,
+                edge_threshold: 1.0,
+            },
+        );
+
+        assert_eq!(subdivision.points.len(), 5);
+        assert!(subdivision.points[0][1].1 < 4.0);
+        assert!(subdivision.points[0][3].1 < 4.0);
+    }
+
+    #[test]
+    fn warp_subdivision_edge_threshold_rejects_weak_texture_edges() {
+        let mut image = RawImage::transparent(9, 9);
+        for y in 0..9 {
+            for x in 0..9 {
+                let value = if y < 2 { 0 } else { 24 };
+                image.set_pixel(x, y, [value, value, value, 255]);
+            }
+        }
+        let corners = WarpedCellCorners {
+            top_left: (0.0, 4.0),
+            top_right: (8.0, 4.0),
+            bottom_left: (0.0, 8.0),
+            bottom_right: (8.0, 8.0),
+        };
+
+        let subdivision = subdivided_warped_cell_grid_with_options(
+            &image,
+            corners,
+            WarpSubdivisionOptions {
+                max_depth: 2,
+                edge_threshold: 60.0,
+            },
+        );
+
+        assert_eq!(subdivision.points[0][2], (4.0, 4.0));
     }
 
     #[test]

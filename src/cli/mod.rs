@@ -10,6 +10,7 @@ use crate::core::{
     ArtifactOptions, ColorMode, DownscaleSampleFrom, OutputFormat, PaletteStrategy,
     PixelWidthDetector, Size, TransformOptions, transform_bytes, write_image_file,
 };
+use crate::mesh::{DEFAULT_WARP_SUBDIVISION_DEPTH, DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD};
 use crate::threading;
 
 const DEFAULT_URL_TIMEOUT_MS: u64 = 30_000;
@@ -66,6 +67,16 @@ pub struct CliArgs {
     pub pixel_width_detector: String,
     #[arg(short = 'u', long = "initial-upscale", default_value = "2")]
     pub initial_upscale: u32,
+    #[arg(
+        long = "warp-subdivision-depth",
+        default_value_t = DEFAULT_WARP_SUBDIVISION_DEPTH
+    )]
+    pub warp_subdivision_depth: u32,
+    #[arg(
+        long = "warp-subdivision-edge-threshold",
+        default_value_t = DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD
+    )]
+    pub warp_subdivision_edge_threshold: f32,
     #[arg(short = 'f', long = "format")]
     pub format: Option<String>,
     #[arg(short = 'q', long = "quality")]
@@ -257,6 +268,8 @@ pub fn parse_cli(args: CliArgs) -> Result<ParsedCli> {
             .transpose()?,
         pixel_width_detector: parse_pixel_width_detector(&args.pixel_width_detector)?,
         initial_upscale: positive(args.initial_upscale, "initial-upscale")?,
+        warp_subdivision_depth: args.warp_subdivision_depth,
+        warp_subdivision_edge_threshold: args.warp_subdivision_edge_threshold,
         artifacts: ArtifactOptions {
             palette_path: args.palette_out,
             palette_scale: positive(args.palette_scale, "palette-scale")?,
@@ -266,6 +279,7 @@ pub fn parse_cli(args: CliArgs) -> Result<ParsedCli> {
         },
         format,
         quality: args.quality,
+        ..TransformOptions::default()
     };
 
     Ok(ParsedCli {
@@ -728,6 +742,10 @@ mod tests {
             "--crop",
             "--crop-size",
             "32x128",
+            "--warp-subdivision-depth",
+            "2",
+            "--warp-subdivision-edge-threshold",
+            "24",
             "--debug-out",
             "debug.png",
             "--unscaled-out",
@@ -768,6 +786,8 @@ mod tests {
                 height: 128
             })
         );
+        assert_eq!(parsed.transform.warp_subdivision_depth, 2);
+        assert_eq!(parsed.transform.warp_subdivision_edge_threshold, 24.0);
         assert_eq!(
             parsed.transform.artifacts.debug_sheet_path,
             Some(PathBuf::from("debug.png"))

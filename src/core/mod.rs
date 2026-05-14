@@ -9,7 +9,11 @@ use crate::image::{
     decode_image, downscale_ignoring_transparent, encode_image, fit_image_inside_dimensions,
     make_boundary_background_transparent, scale_nearest,
 };
-use crate::mesh::{Mesh, MeshResult, refine_mesh_to_local_edges_with_boundary_signals};
+use crate::mesh::{
+    DEFAULT_WARP_SUBDIVISION_DEPTH, DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD, DebugSheetOptions,
+    MAX_WARP_SUBDIVISION_DEPTH, Mesh, MeshResult, WarpSubdivisionOptions,
+    create_debug_sheet_with_options, refine_mesh_to_local_edges_with_boundary_signals,
+};
 use crate::palette::{PaletteResult, create_palette_image, quantize_image};
 
 const MAX_ANCHORED_ASPECT_DRIFT: f32 = 0.18;
@@ -108,6 +112,8 @@ pub struct TransformOptions {
     pub pixel_width: Option<u32>,
     pub pixel_width_detector: PixelWidthDetector,
     pub initial_upscale: u32,
+    pub warp_subdivision_depth: u32,
+    pub warp_subdivision_edge_threshold: f32,
     pub artifacts: ArtifactOptions,
     pub format: OutputFormat,
     pub quality: Option<u8>,
@@ -130,6 +136,8 @@ impl Default for TransformOptions {
             pixel_width: None,
             pixel_width_detector: PixelWidthDetector::Hybrid,
             initial_upscale: 2,
+            warp_subdivision_depth: DEFAULT_WARP_SUBDIVISION_DEPTH,
+            warp_subdivision_edge_threshold: DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD,
             artifacts: ArtifactOptions::default(),
             format: OutputFormat::Png,
             quality: None,
@@ -225,7 +233,7 @@ pub fn transform_image(decoded: RawImage, options: &TransformOptions) -> Result<
         resolved_colors,
         scale_used: prepared.mesh.scale_used,
         metadata: TransformMetadata {
-            edge_close_kernel_size: 3,
+            edge_close_kernel_size: 0,
             palette_color_count: palette_colors.len(),
             pixel_width_source: prepared.mesh.pixel_width_source,
         },
@@ -444,11 +452,15 @@ fn sample_prepared(prepared: &PreparedImage, options: &TransformOptions) -> RawI
             options.color_sample_grid_size,
         );
     }
-    crate::mesh::sample_cells(
+    crate::mesh::sample_cells_with_warp_options(
         &prepared.decoded,
         &prepared.mesh.mesh,
         options.color_sample_grid_size,
         options.transparent_background,
+        WarpSubdivisionOptions {
+            max_depth: options.warp_subdivision_depth,
+            edge_threshold: options.warp_subdivision_edge_threshold,
+        },
     )
 }
 
@@ -517,13 +529,21 @@ fn write_artifacts(
         paths.palette_path = Some(path.clone());
     }
     if let Some(path) = &options.artifacts.debug_sheet_path {
-        let debug = crate::mesh::create_debug_sheet(
+        let debug = create_debug_sheet_with_options(
             debug_image,
             unscaled,
             mesh,
             palette_colors,
-            options.artifacts.debug_scale,
-            options.palette_merge_threshold,
+            DebugSheetOptions {
+                debug_scale: options.artifacts.debug_scale,
+                palette_merge_threshold: options.palette_merge_threshold,
+                transparent_background: options.transparent_background,
+                sample_grid: options.color_sample_grid_size,
+                warp_subdivision: WarpSubdivisionOptions {
+                    max_depth: options.warp_subdivision_depth,
+                    edge_threshold: options.warp_subdivision_edge_threshold,
+                },
+            },
         );
         write_image_file(&debug, path, OutputFormat::Png, None)?;
         paths.debug_sheet_path = Some(path.clone());
@@ -552,6 +572,14 @@ fn validate_options(options: &TransformOptions) -> Result<()> {
     if options.initial_upscale == 0 {
         bail!("initial-upscale must be a positive integer");
     }
+    if options.warp_subdivision_depth > MAX_WARP_SUBDIVISION_DEPTH {
+        bail!("warp-subdivision-depth must be between 0 and {MAX_WARP_SUBDIVISION_DEPTH}");
+    }
+    if !options.warp_subdivision_edge_threshold.is_finite()
+        || options.warp_subdivision_edge_threshold < 0.0
+    {
+        bail!("warp-subdivision-edge-threshold must be a non-negative finite number");
+    }
     if options.scale == Some(0) {
         bail!("scale must be a positive integer");
     }
@@ -579,6 +607,27 @@ mod tests {
         );
         assert_eq!(mesh.mesh.lines_y, vec![0, 10, 20, 30, 40, 50]);
         assert_eq!(mesh.detected_pixel_width, 10);
+    }
+
+    #[test]
+    fn rejects_invalid_warp_subdivision_options() {
+        let mut options = TransformOptions::default();
+        options.warp_subdivision_depth = MAX_WARP_SUBDIVISION_DEPTH + 1;
+        assert!(
+            validate_options(&options)
+                .unwrap_err()
+                .to_string()
+                .contains("warp-subdivision-depth")
+        );
+
+        options.warp_subdivision_depth = DEFAULT_WARP_SUBDIVISION_DEPTH;
+        options.warp_subdivision_edge_threshold = f32::NAN;
+        assert!(
+            validate_options(&options)
+                .unwrap_err()
+                .to_string()
+                .contains("warp-subdivision-edge-threshold")
+        );
     }
 
     #[test]

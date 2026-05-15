@@ -3,39 +3,17 @@
 CPU-only native CLI for converting noisy pixel-art-style images into clean
 pixel-resolution sprites.
 
+## Example
+
+![FixPix comparison](examples/compare.png)
+
 ## Usage
-
-Basic conversion:
-
-```bashP
-fixpix ./input.png --output ./output.png
-```
-
-With the binary built from this repository:
-
-```bash
-./target/release/fixpix ./input.png --output ./output.png
-```
 
 On Windows:
 
 ```powershell
-.\target\release\fixpix.exe .\input.png --output .\output.png
+.\target\release\fixpix.exe .\input.png
 ```
-
-
-## Input And Output Rules
-
-- Input can be a local file path, local directory, or a URL.
-- Input can be positional or passed with `--input`.
-- Output can be positional or passed with `--output`.
-- File input defaults to `<input-name>_fixpix.<format>` beside the input.
-- Directory input is processed recursively for `.png`, `.jpg`, `.jpeg`, and
-  `.webp` files.
-- Directory input defaults to a sibling `<input-directory>_fixpix/`
-  output directory.
-- URL input defaults to `<url-file-name>.<format>` in the current directory.
-- If a file output path has no extension, it is treated as an output directory.
 
 ## Examples
 

@@ -1,7 +1,6 @@
 # FixPix
 
-CPU-only native CLI for converting noisy pixel-art-style images into clean
-pixel-resolution sprites.
+Converts noisy pixel-art-style images into crisp clean pixel-resolution sprites.
 
 ## Example
 

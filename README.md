@@ -226,7 +226,6 @@ cargo run --release --bin generate-visual-artifacts
 FixPix is licensed under the GNU General Public License v3.0 only. See
 `LICENSE` for the full license text.
 
-### Disclosure
+## Disclosure
 
 AI tools where used in the process of creating this project.
-This isn't however a _vibecoded_ project. Parts that include AI generated code are reviewed by me, the author of the project.

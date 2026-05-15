@@ -75,6 +75,8 @@ const WARP_SUBDIVISION_BASELINE_SHIFT_MIN: f32 = 1.0;
 const WARP_SUBDIVISION_MAX_ADJACENT_SHIFT_DELTA: f32 = 0.5;
 const WARP_SUBDIVISION_MAX_UNSUPPORTED_SHIFT: f32 = 2.0;
 const WARP_SUBDIVISION_MAX_RADIUS: u32 = 2;
+const WARP_SUBDIVISION_MESSY_CHANGED_EDGE_COUNT: usize = 3;
+const WARP_SUBDIVISION_MESSY_CHANGED_SEGMENT_RATIO: usize = 2;
 const WARP_SUBDIVISION_CONTOUR_RANK_WEIGHT: f32 = 0.45;
 const WARP_SUBDIVISION_SHIFT_PENALTY: f32 = 3.0;
 const WARP_CORNER_SNAP_MAX_RADIUS: u32 = 3;
@@ -1277,6 +1279,7 @@ struct WarpedCellSubgrid {
 struct EdgeRefinement {
     points: Vec<(f32, f32)>,
     subdivided_segments: Vec<((f32, f32), (f32, f32))>,
+    messy: bool,
 }
 
 #[cfg(test)]
@@ -1294,6 +1297,10 @@ fn subdivided_warped_cell_grid_with_options(
     } else {
         0
     };
+    if depth == 0 {
+        return unsubdivided_warped_cell_grid(corners);
+    }
+
     let segments = 1usize << depth;
     let threshold = options.edge_threshold.max(0.0);
     let top = refined_horizontal_edge_points(
@@ -1325,6 +1332,22 @@ fn subdivided_warped_cell_grid_with_options(
         threshold,
     );
 
+    warped_cell_subgrid_from_refinements(corners, segments, vec![top, bottom, left, right])
+}
+
+fn warped_cell_subgrid_from_refinements(
+    corners: WarpedCellCorners,
+    segments: usize,
+    edge_refinements: Vec<EdgeRefinement>,
+) -> WarpedCellSubgrid {
+    if segments <= 1 || subdivision_too_messy(&edge_refinements, segments) {
+        return unsubdivided_warped_cell_grid(corners);
+    }
+
+    let top = &edge_refinements[0];
+    let bottom = &edge_refinements[1];
+    let left = &edge_refinements[2];
+    let right = &edge_refinements[3];
     let mut points = vec![vec![(0.0, 0.0); segments + 1]; segments + 1];
     for y in 0..=segments {
         let v = y as f32 / segments as f32;
@@ -1353,8 +1376,49 @@ fn subdivided_warped_cell_grid_with_options(
     }
     WarpedCellSubgrid {
         points,
-        edge_refinements: vec![top, bottom, left, right],
+        edge_refinements,
     }
+}
+
+fn unsubdivided_warped_cell_grid(corners: WarpedCellCorners) -> WarpedCellSubgrid {
+    WarpedCellSubgrid {
+        points: vec![
+            vec![corners.top_left, corners.top_right],
+            vec![corners.bottom_left, corners.bottom_right],
+        ],
+        edge_refinements: vec![
+            unsubdivided_edge_refinement(corners.top_left, corners.top_right),
+            unsubdivided_edge_refinement(corners.bottom_left, corners.bottom_right),
+            unsubdivided_edge_refinement(corners.top_left, corners.bottom_left),
+            unsubdivided_edge_refinement(corners.top_right, corners.bottom_right),
+        ],
+    }
+}
+
+fn unsubdivided_edge_refinement(start: (f32, f32), end: (f32, f32)) -> EdgeRefinement {
+    EdgeRefinement {
+        points: vec![start, end],
+        subdivided_segments: Vec::new(),
+        messy: false,
+    }
+}
+
+fn subdivision_too_messy(edge_refinements: &[EdgeRefinement], segments: usize) -> bool {
+    if edge_refinements.iter().any(|edge| edge.messy) {
+        return true;
+    }
+
+    let changed_edges = edge_refinements
+        .iter()
+        .filter(|edge| !edge.subdivided_segments.is_empty())
+        .count();
+    let changed_segments = edge_refinements
+        .iter()
+        .map(|edge| edge.subdivided_segments.len())
+        .sum::<usize>();
+
+    changed_edges >= WARP_SUBDIVISION_MESSY_CHANGED_EDGE_COUNT
+        && changed_segments >= segments.saturating_mul(WARP_SUBDIVISION_MESSY_CHANGED_SEGMENT_RATIO)
 }
 
 fn subdivided_warp_point(subdivision: &WarpedCellSubgrid, u: f32, v: f32) -> (f32, f32) {
@@ -1448,9 +1512,11 @@ fn refined_horizontal_edge_points(
     );
     limit_edge_refinement_displacement(&mut points, &baseline_points);
     subdivided_segments = changed_edge_segments(&points, &baseline_points);
+    let messy = edge_refinement_messy(&points, &baseline_points, WarpSubdivisionAxis::Horizontal);
     EdgeRefinement {
         points,
         subdivided_segments,
+        messy,
     }
 }
 
@@ -1542,10 +1608,48 @@ fn refined_vertical_edge_points(
     );
     limit_edge_refinement_displacement(&mut points, &baseline_points);
     subdivided_segments = changed_edge_segments(&points, &baseline_points);
+    let messy = edge_refinement_messy(&points, &baseline_points, WarpSubdivisionAxis::Vertical);
     EdgeRefinement {
         points,
         subdivided_segments,
+        messy,
     }
+}
+
+fn edge_refinement_messy(
+    points: &[(f32, f32)],
+    baseline_points: &[(f32, f32)],
+    axis: WarpSubdivisionAxis,
+) -> bool {
+    if points.len() != baseline_points.len() || points.len() < 4 {
+        return false;
+    }
+
+    edge_displacement_has_conflicting_signs(points, baseline_points, axis)
+}
+
+fn edge_displacement_has_conflicting_signs(
+    points: &[(f32, f32)],
+    baseline_points: &[(f32, f32)],
+    axis: WarpSubdivisionAxis,
+) -> bool {
+    let mut moved = 0usize;
+    let mut positive = false;
+    let mut negative = false;
+    for index in 1..points.len() - 1 {
+        let displacement = match axis {
+            WarpSubdivisionAxis::Horizontal => points[index].1 - baseline_points[index].1,
+            WarpSubdivisionAxis::Vertical => points[index].0 - baseline_points[index].0,
+        };
+        if displacement.abs() < 0.25 {
+            continue;
+        }
+        moved += 1;
+        positive |= displacement > 0.0;
+        negative |= displacement < 0.0;
+    }
+
+    moved >= 2 && positive && negative
 }
 
 fn refine_vertical_edge_segment(
@@ -4314,6 +4418,60 @@ mod tests {
         );
 
         assert_eq!(subdivision.points.len(), 2);
+        assert!(
+            subdivision
+                .edge_refinements
+                .iter()
+                .all(|edge| edge.subdivided_segments.is_empty())
+        );
+    }
+
+    #[test]
+    fn warp_subdivision_falls_back_to_unsubdivided_when_refinement_is_messy() {
+        let corners = WarpedCellCorners {
+            top_left: (0.0, 8.0),
+            top_right: (16.0, 8.0),
+            bottom_left: (0.0, 14.0),
+            bottom_right: (16.0, 14.0),
+        };
+        let top_baseline = vec![
+            corners.top_left,
+            (4.0, 8.0),
+            (8.0, 8.0),
+            (12.0, 8.0),
+            corners.top_right,
+        ];
+        let top_points = vec![
+            corners.top_left,
+            (4.0, 7.0),
+            (8.0, 9.0),
+            (12.0, 7.0),
+            corners.top_right,
+        ];
+        let top = EdgeRefinement {
+            messy: edge_refinement_messy(
+                &top_points,
+                &top_baseline,
+                WarpSubdivisionAxis::Horizontal,
+            ),
+            subdivided_segments: changed_edge_segments(&top_points, &top_baseline),
+            points: top_points,
+        };
+        assert!(top.messy);
+
+        let subdivision = warped_cell_subgrid_from_refinements(
+            corners,
+            4,
+            vec![
+                top,
+                unsubdivided_edge_refinement(corners.bottom_left, corners.bottom_right),
+                unsubdivided_edge_refinement(corners.top_left, corners.bottom_left),
+                unsubdivided_edge_refinement(corners.top_right, corners.bottom_right),
+            ],
+        );
+
+        assert_eq!(subdivision.points.len(), 2);
+        assert_eq!(subdivided_warp_point(&subdivision, 0.5, 0.0), (8.0, 8.0));
         assert!(
             subdivision
                 .edge_refinements

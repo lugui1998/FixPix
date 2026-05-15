@@ -401,22 +401,21 @@ pub fn sample_cells_with_warp_and_edge_close_options(
     } else {
         0.5
     };
+    let warped_sampler = WarpedCellSampler {
+        image: sampling_image,
+        background_mask: background_mask.as_ref(),
+        mesh,
+        sample_grid,
+        warp_options,
+        min_opaque_coverage,
+    };
     let cells = (0..width as usize * height as usize)
         .into_par_iter()
         .map(|index| {
             let x = index as u32 % width;
             let y = index as u32 / width;
             let mut cell = if mesh.warp.is_some() {
-                sample_warped_cell(
-                    sampling_image,
-                    background_mask.as_ref(),
-                    mesh,
-                    x as usize,
-                    y as usize,
-                    sample_grid,
-                    warp_options,
-                    min_opaque_coverage,
-                )
+                sample_warped_cell(&warped_sampler, x as usize, y as usize)
             } else {
                 let (x0, x1, y0, y1) =
                     mesh_cell_bounds(mesh, x as usize, y as usize, sampling_image);
@@ -461,16 +460,22 @@ struct SampledCell {
     background_coverage: u8,
 }
 
-fn sample_warped_cell(
-    image: &RawImage,
-    background_mask: Option<&BackgroundMask>,
-    mesh: &Mesh,
-    cell_x: usize,
-    cell_y: usize,
+struct WarpedCellSampler<'a> {
+    image: &'a RawImage,
+    background_mask: Option<&'a BackgroundMask>,
+    mesh: &'a Mesh,
     sample_grid: u32,
     warp_options: WarpSubdivisionOptions,
     min_opaque_coverage: f32,
+}
+
+fn sample_warped_cell(
+    sampler: &WarpedCellSampler<'_>,
+    cell_x: usize,
+    cell_y: usize,
 ) -> SampledCell {
+    let image = sampler.image;
+    let mesh = sampler.mesh;
     let Some(corners) = warped_cell_corners(mesh, cell_x, cell_y) else {
         let (x0, x1, y0, y1) = mesh_cell_bounds(mesh, cell_x, cell_y, image);
         return SampledCell {
@@ -480,19 +485,27 @@ fn sample_warped_cell(
                 x1,
                 y0,
                 y1,
-                sample_grid,
-                min_opaque_coverage,
+                sampler.sample_grid,
+                sampler.min_opaque_coverage,
             ),
-            background_coverage: background_mask
+            background_coverage: sampler
+                .background_mask
                 .map(|mask| background_coverage_for_bounds(mask, x0, x1, y0, y1))
                 .unwrap_or(0),
         };
     };
 
-    let resolved = resolve_warped_cell(image, mesh, cell_x, cell_y, warp_options, corners);
+    let resolved = resolve_warped_cell(
+        image,
+        sampler.mesh,
+        cell_x,
+        cell_y,
+        sampler.warp_options,
+        corners,
+    );
     let subdivision =
         subdivided_warped_cell_grid_with_options(image, resolved.corners, resolved.options);
-    let grid = sample_grid.max(1);
+    let grid = sampler.sample_grid.max(1);
     let center = subdivided_warp_point(&subdivision, 0.5, 0.5);
     let mut keys = [0u32; WARP_SAMPLE_COLOR_CAPACITY];
     let mut counts = [0u32; WARP_SAMPLE_COLOR_CAPACITY];
@@ -519,7 +532,10 @@ fn sample_warped_cell(
                 .round()
                 .clamp(0.0, image.height.saturating_sub(1) as f32) as u32;
             total_samples += 1;
-            if background_mask.is_some_and(|mask| mask.is_background(x, y)) {
+            if sampler
+                .background_mask
+                .is_some_and(|mask| mask.is_background(x, y))
+            {
                 background_samples += 1;
             }
             let sampled = image.pixel(x, y);
@@ -558,7 +574,7 @@ fn sample_warped_cell(
         }
     }
 
-    if !has_min_opaque_coverage(opaque_samples, total_samples, min_opaque_coverage) {
+    if !has_min_opaque_coverage(opaque_samples, total_samples, sampler.min_opaque_coverage) {
         return SampledCell {
             color: [0, 0, 0, 0],
             background_coverage: coverage_to_u8(background_samples, total_samples),
@@ -706,7 +722,7 @@ fn sampled_local_support_keeps_background_candidate(
     if background_is_vivid && shares_background_dominant_channel(candidate, *background) {
         let opposing_blocks =
             support.opposing >= support.similar + SAMPLED_LOCAL_OPPOSING_SUPPORT_MARGIN;
-        (has_similar && !opposing_blocks) || (!has_strong && !opposing_blocks)
+        !opposing_blocks && (has_similar || !has_strong)
     } else if background_is_dark {
         has_similar || has_strong
     } else {
@@ -1269,16 +1285,21 @@ fn bilinear_point(corners: WarpedCellCorners, u: f32, v: f32) -> (f32, f32) {
     )
 }
 
+type MeshPoint = (f32, f32);
+type EdgeSegment = (MeshPoint, MeshPoint);
+type SubdivisionBounds = (i32, i32, i32, i32);
+type SubdivisionBaselineLimit = Option<(MeshPoint, f32)>;
+
 #[derive(Debug, Clone)]
 struct WarpedCellSubgrid {
-    points: Vec<Vec<(f32, f32)>>,
+    points: Vec<Vec<MeshPoint>>,
     edge_refinements: Vec<EdgeRefinement>,
 }
 
 #[derive(Debug, Clone)]
 struct EdgeRefinement {
-    points: Vec<(f32, f32)>,
-    subdivided_segments: Vec<((f32, f32), (f32, f32))>,
+    points: Vec<MeshPoint>,
+    subdivided_segments: Vec<EdgeSegment>,
     messy: bool,
 }
 
@@ -1349,11 +1370,11 @@ fn warped_cell_subgrid_from_refinements(
     let left = &edge_refinements[2];
     let right = &edge_refinements[3];
     let mut points = vec![vec![(0.0, 0.0); segments + 1]; segments + 1];
-    for y in 0..=segments {
+    for (y, row) in points.iter_mut().enumerate().take(segments + 1) {
         let v = y as f32 / segments as f32;
-        for x in 0..=segments {
+        for (x, point) in row.iter_mut().enumerate().take(segments + 1) {
             let u = x as f32 / segments as f32;
-            points[y][x] = if y == 0 {
+            *point = if y == 0 {
                 top.points[x]
             } else if y == segments {
                 bottom.points[x]
@@ -1524,7 +1545,7 @@ fn refine_horizontal_edge_segment(
     image: &RawImage,
     points: &mut [(f32, f32)],
     baseline_points: &[(f32, f32)],
-    subdivided_segments: &mut Vec<((f32, f32), (f32, f32))>,
+    subdivided_segments: &mut Vec<EdgeSegment>,
     start_index: usize,
     end_index: usize,
     edge_threshold: f32,
@@ -1656,7 +1677,7 @@ fn refine_vertical_edge_segment(
     image: &RawImage,
     points: &mut [(f32, f32)],
     baseline_points: &[(f32, f32)],
-    subdivided_segments: &mut Vec<((f32, f32), (f32, f32))>,
+    subdivided_segments: &mut Vec<EdgeSegment>,
     start_index: usize,
     end_index: usize,
     edge_threshold: f32,
@@ -1763,7 +1784,7 @@ fn clamp_displacement_to_neighbor(
 fn changed_edge_segments(
     points: &[(f32, f32)],
     baseline_points: &[(f32, f32)],
-) -> Vec<((f32, f32), (f32, f32))> {
+) -> Vec<EdgeSegment> {
     if points.len() != baseline_points.len() {
         return Vec::new();
     }
@@ -1796,9 +1817,14 @@ fn fill_linear_edge_points(points: &mut [(f32, f32)], start_index: usize, end_in
     }
     let start = points[start_index];
     let end = points[end_index];
-    for index in start_index + 1..end_index {
+    for (index, point) in points
+        .iter_mut()
+        .enumerate()
+        .take(end_index)
+        .skip(start_index + 1)
+    {
         let t = (index - start_index) as f32 / span as f32;
-        points[index] = (
+        *point = (
             start.0 * (1.0 - t) + end.0 * t,
             start.1 * (1.0 - t) + end.1 * t,
         );
@@ -1896,7 +1922,7 @@ fn refine_subdivision_point(
     end: (f32, f32),
     edge_threshold: f32,
     axis: WarpSubdivisionAxis,
-    baseline_limit: Option<((f32, f32), f32)>,
+    baseline_limit: SubdivisionBaselineLimit,
 ) -> (f32, f32) {
     if image.width < 2 || image.height < 2 {
         return point;
@@ -1910,7 +1936,7 @@ fn refine_subdivision_point(
         return point;
     };
 
-    let mut best = search_subdivision_candidate(
+    let local_search = SubdivisionSearch {
         image,
         point,
         start,
@@ -1918,32 +1944,23 @@ fn refine_subdivision_point(
         axis,
         base_score,
         edge_threshold,
-        local_bounds,
-        false,
+        bounds: local_bounds,
+        require_contour: false,
         baseline_limit,
-    );
+    };
+    let mut best = search_subdivision_candidate(local_search);
 
-    if segment_needs_contour_fallback(start, end) {
-        if let Some(envelope_bounds) =
+    if segment_needs_contour_fallback(start, end)
+        && let Some(envelope_bounds) =
             subdivision_candidate_bounds(image, point, start, end, radius)
-        {
-            if let Some(envelope_candidate) = search_subdivision_candidate(
-                image,
-                point,
-                start,
-                end,
-                axis,
-                base_score,
-                edge_threshold,
-                envelope_bounds,
-                true,
-                baseline_limit,
-            ) {
-                if best.is_none_or(|candidate| envelope_candidate.rank > candidate.rank) {
-                    best = Some(envelope_candidate);
-                }
-            }
-        }
+        && let Some(envelope_candidate) = search_subdivision_candidate(SubdivisionSearch {
+            bounds: envelope_bounds,
+            require_contour: true,
+            ..local_search
+        })
+        && best.is_none_or(|candidate| envelope_candidate.rank > candidate.rank)
+    {
+        best = Some(envelope_candidate);
     }
 
     best.map(|candidate| candidate.point).unwrap_or(point)
@@ -1956,18 +1973,33 @@ struct SubdivisionCandidate {
     rank: f32,
 }
 
-fn search_subdivision_candidate(
-    image: &RawImage,
-    point: (f32, f32),
-    start: (f32, f32),
-    end: (f32, f32),
+#[derive(Clone, Copy)]
+struct SubdivisionSearch<'a> {
+    image: &'a RawImage,
+    point: MeshPoint,
+    start: MeshPoint,
+    end: MeshPoint,
     axis: WarpSubdivisionAxis,
     base_score: f32,
     edge_threshold: f32,
-    bounds: (i32, i32, i32, i32),
+    bounds: SubdivisionBounds,
     require_contour: bool,
-    baseline_limit: Option<((f32, f32), f32)>,
-) -> Option<SubdivisionCandidate> {
+    baseline_limit: SubdivisionBaselineLimit,
+}
+
+fn search_subdivision_candidate(search: SubdivisionSearch<'_>) -> Option<SubdivisionCandidate> {
+    let SubdivisionSearch {
+        image,
+        point,
+        start,
+        end,
+        axis,
+        base_score,
+        edge_threshold,
+        bounds,
+        require_contour,
+        baseline_limit,
+    } = search;
     let original_x = point.0.round() as i32;
     let original_y = point.1.round() as i32;
     let (min_x, max_x, min_y, max_y) = bounds;
@@ -1979,10 +2011,10 @@ fn search_subdivision_candidate(
             if point_overlaps(candidate, start) || point_overlaps(candidate, end) {
                 continue;
             }
-            if let Some((baseline_point, max_baseline_shift)) = baseline_limit {
-                if point_distance(candidate, baseline_point) > max_baseline_shift {
-                    continue;
-                }
+            if let Some((baseline_point, max_baseline_shift)) = baseline_limit
+                && point_distance(candidate, baseline_point) > max_baseline_shift
+            {
+                continue;
             }
             let score = subdivision_point_score(image, x, y, axis);
             if subdivision_snap_weight(base_score, score, edge_threshold).is_none() {
@@ -2063,7 +2095,7 @@ fn subdivision_local_candidate_bounds(
     image: &RawImage,
     point: (f32, f32),
     radius: u32,
-) -> Option<(i32, i32, i32, i32)> {
+) -> Option<SubdivisionBounds> {
     let radius = radius as i32;
     let original_x = point.0.round() as i32;
     let original_y = point.1.round() as i32;
@@ -2080,7 +2112,7 @@ fn subdivision_candidate_bounds(
     start: (f32, f32),
     end: (f32, f32),
     radius: u32,
-) -> Option<(i32, i32, i32, i32)> {
+) -> Option<SubdivisionBounds> {
     let radius = radius as f32;
     let min_x = point.0.min(start.0).min(end.0).floor() - radius;
     let max_x = point.0.max(start.0).max(end.0).ceil() + radius;
@@ -3544,6 +3576,12 @@ fn draw_grid_overlay_with_options(
     if mesh.mesh.warp.is_some() {
         let column_count = mesh.mesh.lines_x.len().saturating_sub(1);
         let row_count = mesh.mesh.lines_y.len().saturating_sub(1);
+        let warped_draw = WarpedGridDrawContext {
+            source,
+            mesh,
+            preview_scale,
+            warp_options,
+        };
         for cell_y in 0..row_count {
             for cell_x in 0..column_count {
                 draw_unwarped_cell_grid_edges(&mut out, mesh, cell_x, cell_y, preview_scale);
@@ -3554,13 +3592,10 @@ fn draw_grid_overlay_with_options(
                 if let Some(corners) = warped_cell_corners(&mesh.mesh, cell_x, cell_y) {
                     draw_warped_cell_grid_edges(
                         &mut out,
-                        source,
+                        &warped_draw,
                         corners,
-                        mesh,
                         cell_x,
                         cell_y,
-                        preview_scale,
-                        warp_options,
                         false,
                     );
                 }
@@ -3571,13 +3606,10 @@ fn draw_grid_overlay_with_options(
                 if let Some(corners) = warped_cell_corners(&mesh.mesh, cell_x, cell_y) {
                     draw_warped_cell_grid_edges(
                         &mut out,
-                        source,
+                        &warped_draw,
                         corners,
-                        mesh,
                         cell_x,
                         cell_y,
-                        preview_scale,
-                        warp_options,
                         true,
                     );
                 }
@@ -3640,33 +3672,47 @@ fn draw_unwarped_cell_grid_edges(
     );
 }
 
-fn draw_warped_cell_grid_edges(
-    image: &mut RawImage,
-    source: &RawImage,
-    corners: WarpedCellCorners,
-    mesh: &MeshResult,
-    cell_x: usize,
-    cell_y: usize,
+struct WarpedGridDrawContext<'a> {
+    source: &'a RawImage,
+    mesh: &'a MeshResult,
     preview_scale: u32,
     warp_options: WarpSubdivisionOptions,
+}
+
+fn draw_warped_cell_grid_edges(
+    image: &mut RawImage,
+    context: &WarpedGridDrawContext<'_>,
+    corners: WarpedCellCorners,
+    cell_x: usize,
+    cell_y: usize,
     draw_subdivided: bool,
 ) {
-    let resolved = resolve_warped_cell(source, &mesh.mesh, cell_x, cell_y, warp_options, corners);
+    let resolved = resolve_warped_cell(
+        context.source,
+        &context.mesh.mesh,
+        cell_x,
+        cell_y,
+        context.warp_options,
+        corners,
+    );
     if !draw_subdivided && !resolved.uses_warped_corners {
         draw_cell_grid_edges(
             image,
             corners,
-            mesh,
-            preview_scale,
+            context.mesh,
+            context.preview_scale,
             DEBUG_UNUSED_WARPED_GRID_COLOR,
         );
     }
-    let subdivision =
-        subdivided_warped_cell_grid_with_options(source, resolved.corners, resolved.options);
+    let subdivision = subdivided_warped_cell_grid_with_options(
+        context.source,
+        resolved.corners,
+        resolved.options,
+    );
     if draw_subdivided {
-        draw_subdivided_edge_segments(image, &subdivision, mesh, preview_scale);
+        draw_subdivided_edge_segments(image, &subdivision, context.mesh, context.preview_scale);
     } else {
-        draw_unsubdivided_edge_segments(image, &subdivision, mesh, preview_scale);
+        draw_unsubdivided_edge_segments(image, &subdivision, context.mesh, context.preview_scale);
     }
 }
 
@@ -3689,15 +3735,13 @@ fn draw_subdivided_edge_segments(
     preview_scale: u32,
 ) {
     for edge in &subdivision.edge_refinements {
-        let mut visible_index = 0usize;
-        for (start, end) in &edge.subdivided_segments {
-            let color = if visible_index % 2 == 0 {
+        for (visible_index, (start, end)) in edge.subdivided_segments.iter().enumerate() {
+            let color = if visible_index.is_multiple_of(2) {
                 DEBUG_SUBDIVIDED_EDGE_COLOR_A
             } else {
                 DEBUG_SUBDIVIDED_EDGE_COLOR_B
             };
             draw_warped_grid_edge(image, *start, *end, mesh, preview_scale, color);
-            visible_index += 1;
         }
     }
 }

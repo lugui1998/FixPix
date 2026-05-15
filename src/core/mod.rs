@@ -720,8 +720,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_warp_subdivision_options() {
-        let mut options = TransformOptions::default();
-        options.edge_close_kernel_size = 4;
+        let options = TransformOptions {
+            edge_close_kernel_size: 4,
+            ..TransformOptions::default()
+        };
         assert!(
             validate_options(&options)
                 .unwrap_err()
@@ -729,8 +731,10 @@ mod tests {
                 .contains("edge-close-kernel-size")
         );
 
-        options.edge_close_kernel_size = DEFAULT_EDGE_CLOSE_KERNEL_SIZE;
-        options.warp_subdivision_depth = MAX_WARP_SUBDIVISION_DEPTH + 1;
+        let options = TransformOptions {
+            warp_subdivision_depth: MAX_WARP_SUBDIVISION_DEPTH + 1,
+            ..TransformOptions::default()
+        };
         assert!(
             validate_options(&options)
                 .unwrap_err()
@@ -738,8 +742,10 @@ mod tests {
                 .contains("warp-subdivision-depth")
         );
 
-        options.warp_subdivision_depth = DEFAULT_WARP_SUBDIVISION_DEPTH;
-        options.warp_subdivision_edge_threshold = f32::NAN;
+        let options = TransformOptions {
+            warp_subdivision_edge_threshold: f32::NAN,
+            ..TransformOptions::default()
+        };
         assert!(
             validate_options(&options)
                 .unwrap_err()

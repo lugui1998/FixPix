@@ -561,9 +561,9 @@ fn is_boundary_background_fringe_candidate(
     let support = local_foreground_support(Some(mask), image, background, pixel, x, y);
     let keep_candidate =
         local_support_keeps_background_candidate(pixel, background, background_is_vivid, support);
-    if is_edge_barrier {
-        !keep_candidate
-    } else if background_is_vivid && shares_background_dominant_channel(pixel, *background) {
+    if is_edge_barrier
+        || (background_is_vivid && shares_background_dominant_channel(pixel, *background))
+    {
         !keep_candidate
     } else {
         true
@@ -646,7 +646,7 @@ fn local_support_keeps_background_candidate(
     let has_strong = support.strong >= LOCAL_STRONG_FOREGROUND_SUPPORT_MIN;
     if background_is_vivid && shares_background_dominant_channel(candidate, *background) {
         let opposing_blocks = support.opposing >= support.similar + LOCAL_OPPOSING_SUPPORT_MARGIN;
-        (has_similar && !opposing_blocks) || (!has_strong && !opposing_blocks)
+        !opposing_blocks && (has_similar || !has_strong)
     } else {
         has_similar || has_strong
     }

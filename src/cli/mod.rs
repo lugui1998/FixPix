@@ -289,7 +289,6 @@ pub fn parse_cli(args: CliArgs) -> Result<ParsedCli> {
         },
         format,
         quality: args.quality,
-        ..TransformOptions::default()
     };
 
     Ok(ParsedCli {

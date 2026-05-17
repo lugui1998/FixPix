@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::core::{
     ArtifactOptions, ColorMode, DEFAULT_EDGE_CLOSE_KERNEL_SIZE, DEFAULT_MIN_INPUT_HEIGHT,
-    DEFAULT_MIN_INPUT_WIDTH, DownscaleSampleFrom, OutputFormat, PaletteStrategy,
+    DEFAULT_MIN_INPUT_WIDTH, DownscaleSampleFrom, OutputFormat, PaletteClustering, PaletteStrategy,
     PixelWidthDetector, PixelWidthSource, Size, TransformOptions, TransformResult, transform_bytes,
     write_image_file,
 };
@@ -48,6 +48,8 @@ pub struct CliArgs {
     pub color_sample_grid_size: u32,
     #[arg(long = "palette-strategy", default_value = "global")]
     pub palette_strategy: String,
+    #[arg(long = "palette-clustering", default_value = "spatial")]
+    pub palette_clustering: String,
     #[arg(short = 's', long = "scale")]
     pub scale: Option<u32>,
     #[arg(long = "auto-scale-width")]
@@ -313,6 +315,7 @@ pub fn parse_cli(args: CliArgs) -> Result<ParsedCli> {
         palette_merge_threshold: args.palette_merge_threshold,
         color_sample_grid_size: positive(args.color_sample_grid_size, "color-sample-grid-size")?,
         palette_strategy: parse_palette_strategy(&args.palette_strategy)?,
+        palette_clustering: parse_palette_clustering(&args.palette_clustering)?,
         scale: args
             .scale
             .map(|scale| positive(scale, "scale"))
@@ -727,6 +730,14 @@ fn parse_palette_strategy(value: &str) -> Result<PaletteStrategy> {
     }
 }
 
+fn parse_palette_clustering(value: &str) -> Result<PaletteClustering> {
+    match value {
+        "regular" => Ok(PaletteClustering::Regular),
+        "spatial" => Ok(PaletteClustering::Spatial),
+        _ => bail!("palette-clustering must be one of: regular, spatial"),
+    }
+}
+
 fn parse_downscale_sample_from(value: &str) -> Result<DownscaleSampleFrom> {
     match value {
         "pixelated" => Ok(DownscaleSampleFrom::Pixelated),
@@ -849,6 +860,10 @@ mod tests {
         let args = base_args("tests/sources/fish.png");
         let parsed = parse_cli(args).unwrap();
         assert_eq!(parsed.transform.colors, ColorMode::Auto);
+        assert_eq!(
+            parsed.transform.palette_clustering,
+            PaletteClustering::Spatial
+        );
     }
 
     #[test]
@@ -870,6 +885,8 @@ mod tests {
             "5",
             "--palette-strategy",
             "sampled",
+            "--palette-clustering",
+            "regular",
             "--downscale",
             "32x32",
             "--downscale-sample-from",
@@ -908,6 +925,10 @@ mod tests {
         assert_eq!(parsed.transform.palette_merge_threshold, 0.0);
         assert_eq!(parsed.transform.color_sample_grid_size, 5);
         assert_eq!(parsed.transform.palette_strategy, PaletteStrategy::Sampled);
+        assert_eq!(
+            parsed.transform.palette_clustering,
+            PaletteClustering::Regular
+        );
         assert_eq!(
             parsed.transform.downscale,
             Some(Size {
@@ -1014,6 +1035,12 @@ mod tests {
                 "fixpix",
                 "tests/sources/fish.png",
                 "--palette-strategy",
+                "weird",
+            ],
+            vec![
+                "fixpix",
+                "tests/sources/fish.png",
+                "--palette-clustering",
                 "weird",
             ],
             vec![

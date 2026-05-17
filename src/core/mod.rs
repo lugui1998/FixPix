@@ -14,7 +14,7 @@ use crate::mesh::{
     MAX_WARP_SUBDIVISION_DEPTH, Mesh, MeshResult, WarpSubdivisionOptions,
     create_debug_sheet_with_options, refine_mesh_to_local_edges_with_boundary_signals,
 };
-use crate::palette::{PaletteResult, create_palette_image, quantize_image};
+use crate::palette::{PaletteDebugInfo, PaletteResult, create_palette_image, quantize_image};
 
 const MAX_ANCHORED_ASPECT_DRIFT: f32 = 0.18;
 pub const DEFAULT_EDGE_CLOSE_KERNEL_SIZE: u32 = 3;
@@ -49,6 +49,12 @@ pub enum ColorMode {
 pub enum PaletteStrategy {
     Global,
     Sampled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteClustering {
+    Regular,
+    Spatial,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +111,7 @@ pub struct TransformOptions {
     pub palette_merge_threshold: f32,
     pub color_sample_grid_size: u32,
     pub palette_strategy: PaletteStrategy,
+    pub palette_clustering: PaletteClustering,
     pub scale: Option<u32>,
     pub auto_scale_target: Option<Size>,
     pub downscale: Option<Size>,
@@ -132,6 +139,7 @@ impl Default for TransformOptions {
             palette_merge_threshold: 1.0,
             color_sample_grid_size: 5,
             palette_strategy: PaletteStrategy::Global,
+            palette_clustering: PaletteClustering::Spatial,
             scale: None,
             auto_scale_target: None,
             downscale: None,
@@ -193,11 +201,13 @@ pub fn transform_image(decoded: RawImage, options: &TransformOptions) -> Result<
         image: downsampled,
         resolved_colors,
         palette_colors: downsampled_palette_colors,
+        debug_info: palette_debug_info,
     } = quantize_image(
         &sampled,
         options.colors,
         options.palette_merge_threshold,
         options.palette_strategy,
+        options.palette_clustering,
     );
     let base = if let Some(size) = options.crop_size {
         center_transparent_content(&downsampled, size.width, size.height)?
@@ -232,6 +242,7 @@ pub fn transform_image(decoded: RawImage, options: &TransformOptions) -> Result<
         &base,
         &prepared.debug_mesh,
         &palette_colors,
+        palette_debug_info.as_ref(),
         options,
     )?;
 
@@ -567,6 +578,7 @@ fn write_artifacts(
     unscaled: &RawImage,
     mesh: &MeshResult,
     palette_colors: &[[u8; 3]],
+    palette_debug_info: Option<&PaletteDebugInfo>,
     options: &TransformOptions,
 ) -> Result<TransformArtifactPaths> {
     let mut paths = TransformArtifactPaths::default();
@@ -590,6 +602,7 @@ fn write_artifacts(
             unscaled,
             mesh,
             palette_colors,
+            palette_debug_info,
             DebugSheetOptions {
                 debug_scale: options.artifacts.debug_scale,
                 palette_merge_threshold: options.palette_merge_threshold,

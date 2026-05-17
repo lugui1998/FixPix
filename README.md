@@ -88,10 +88,11 @@ fixpix ./input.png --pixel-width 8
 | `-o, --output <path>` | path | derived automatically | Output file path or output directory. |
 | `-j, --jobs <n>` | positive integer | available CPU count | CPU worker count for batch work and the global Rayon pool. |
 | `--threads <n>` | positive integer | available CPU count | Alias for `--jobs`. |
-| `-c, --colors <integer\|auto\|full>` | integer, `auto`, or `full` | `auto` | Palette mode. Use `auto` or `0` to estimate a palette size, a positive integer to force that many colors, or `full` / any negative integer to skip color clustering. |
-| `--palette-merge-threshold <n>` | number | `1` | Merge threshold used by auto palette selection. `0` keeps more exact color distinctions. |
+| `-c, --colors <integer\|auto\|full>` | integer, `auto`, or `full` | `auto` | Palette mode. Use `auto` or `0` to iteratively choose a palette size for the selected clustering mode, a positive integer to force that many colors, or `full` / any negative integer to skip color clustering. |
+| `--palette-merge-threshold <n>` | number | `1` | Color-only merge threshold used by regular palette selection. `0` keeps more exact color distinctions. |
 | `--color-sample-grid-size <n>` | positive integer | `5` | Cell sampling control. `1` samples only the center; values above `1` use dominant cell color sampling. |
 | `--palette-strategy <global\|sampled>` | enum | `global` | `global` builds the palette from image-wide color stats. `sampled` builds it from sampled cell colors. |
+| `--palette-clustering <spatial\|regular>` | enum | `spatial` | `spatial` clusters with color and image position so similar distant regions can stay separate. `regular` uses color-only clustering. |
 | `-s, --scale <n>` | positive integer | automatic | Final integer output scale. Overrides automatic scale selection. |
 | `--auto-scale-width <n>` | positive integer | none | Target width for automatic output scaling. Must be used with `--auto-scale-height`. |
 | `--auto-scale-height <n>` | positive integer | none | Target height for automatic output scaling. Must be used with `--auto-scale-width`. |
@@ -113,7 +114,7 @@ fixpix ./input.png --pixel-width 8
 | `--url-timeout-ms <n>` | positive integer | `30000` | Timeout for URL input downloads, in milliseconds. |
 | `--url-max-bytes <n>` | positive integer | `52428800` | Maximum URL input size in bytes. Checked against `Content-Length` when available and while reading the response. |
 | `--url-content-types <list>` | comma-separated MIME list | `image/*,application/octet-stream` | Allowed URL response content types. Exact types and wildcards such as `image/*` are supported. |
-| `--debug-out <path>` | path | none | Writes a combined debug sheet with source preview, edge preview, line overlays, grid overlay, final image, and palette. Transparent-background runs put background mask and sampled mask coverage panels on their own row. |
+| `--debug-out <path>` | path | none | Writes a combined debug sheet with source preview, edge preview, line overlays, grid overlay, final image, palette, and palette cluster graph when clustering runs. Transparent-background runs put background mask and sampled mask coverage panels on their own row. |
 | `--debug-scale <n>` | positive integer | `6` | Scale used for debug sheet previews. |
 | `--unscaled-out <path>` | path | none | Writes the unscaled cleaned sprite before final output scaling. |
 | `--palette-out <path>` | path | none | Writes a palette swatch image. |

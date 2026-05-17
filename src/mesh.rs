@@ -7,13 +7,16 @@ use crate::image::{
     closed_color_edge_mask, color_distance_sq, color_edge_mask, limit_scale_for_max_dimension,
     scale_nearest,
 };
-use crate::palette::{has_min_opaque_coverage, sample_cell_color_with_min_opaque_coverage};
+use crate::palette::{
+    PaletteDebugInfo, has_min_opaque_coverage, sample_cell_color_with_min_opaque_coverage,
+};
 
 const MIN_DEBUG_SEGMENT_LENGTH: u32 = 6;
 const MAX_DEBUG_SEGMENTS_PER_FAMILY: usize = 250;
 const DEBUG_PALETTE_MAX_SWATCH_SCALE: u32 = 64;
 const DEBUG_PALETTE_MAX_WIDTH_RATIO: f32 = 0.36;
 const DEBUG_PALETTE_MAX_HEIGHT_RATIO: f32 = 0.24;
+const DEBUG_CLUSTER_GRAPH_RENDER_SCALE: u32 = 6;
 const DEBUG_GRID_COLOR: [u8; 4] = [255, 0, 0, 255];
 const DEBUG_UNWARPED_GRID_COLOR: [u8; 4] = [80, 200, 255, 255];
 const DEBUG_UNUSED_WARPED_GRID_COLOR: [u8; 4] = [255, 80, 220, 120];
@@ -2791,6 +2794,7 @@ pub fn create_debug_sheet(
         unscaled,
         mesh,
         palette_colors,
+        None,
         DebugSheetOptions {
             debug_scale,
             palette_merge_threshold: _palette_merge_threshold,
@@ -2817,6 +2821,7 @@ pub fn create_debug_sheet_with_options(
     unscaled: &RawImage,
     mesh: &MeshResult,
     palette_colors: &[[u8; 3]],
+    palette_debug_info: Option<&PaletteDebugInfo>,
     options: DebugSheetOptions,
 ) -> RawImage {
     let detection_image = if mesh.scale_used > 1 {
@@ -2877,6 +2882,11 @@ pub fn create_debug_sheet_with_options(
     });
     let palette_preview =
         create_debug_palette_preview(palette_colors, final_preview.width, final_preview.height);
+    let cluster_preview = palette_debug_info
+        .filter(|debug| !debug.points.is_empty() && !debug.palette_colors.is_empty())
+        .map(|debug| {
+            create_debug_palette_cluster_graph(debug, final_preview.width, final_preview.height)
+        });
 
     let top_row = vec![original_preview, canny_preview, hough_preview, grid_preview];
     let mut mask_row = Vec::new();
@@ -2887,7 +2897,10 @@ pub fn create_debug_sheet_with_options(
         mask_row.push(preview);
     }
 
-    let output_row = vec![final_preview, palette_preview];
+    let mut output_row = vec![final_preview, palette_preview];
+    if let Some(preview) = cluster_preview {
+        output_row.push(preview);
+    }
     let mut rows = vec![top_row.as_slice()];
     if !mask_row.is_empty() {
         rows.push(mask_row.as_slice());
@@ -3052,6 +3065,185 @@ fn create_debug_palette_preview(
     } else {
         palette
     }
+}
+
+fn create_debug_palette_cluster_graph(
+    debug: &PaletteDebugInfo,
+    panel_width: u32,
+    panel_height: u32,
+) -> RawImage {
+    let width = panel_width.max(1);
+    let height = panel_height.max(1);
+    let render_scale = debug_cluster_graph_render_scale(width, height);
+    let graph = render_debug_palette_cluster_graph(
+        debug,
+        width.div_ceil(render_scale),
+        height.div_ceil(render_scale),
+    );
+    if render_scale <= 1 {
+        return graph;
+    }
+
+    let graph = scale_nearest(&graph, render_scale);
+    let image = RawImage::new(width, height, vec![255; (width * height * 4) as usize]);
+    let offset_x = (width as i32 - graph.width as i32) / 2;
+    let offset_y = (height as i32 - graph.height as i32) / 2;
+    crate::image::blit_image(&image, &graph, offset_x, offset_y)
+}
+
+fn render_debug_palette_cluster_graph(
+    debug: &PaletteDebugInfo,
+    panel_width: u32,
+    panel_height: u32,
+) -> RawImage {
+    let width = panel_width.max(1);
+    let height = panel_height.max(1);
+    let margin = debug_graph_margin(width, height);
+    let mut image = RawImage::new(width, height, vec![255; (width * height * 4) as usize]);
+    draw_line(
+        &mut image,
+        margin,
+        height - margin - 1,
+        width - margin - 1,
+        height - margin - 1,
+        [190, 190, 190, 255],
+    );
+    draw_line(
+        &mut image,
+        margin,
+        margin,
+        margin,
+        height - margin - 1,
+        [190, 190, 190, 255],
+    );
+
+    let (min_a, max_a, min_b, max_b) = palette_cluster_lab_bounds(debug);
+    for (point, assignment) in debug.points.iter().zip(&debug.assignments) {
+        let (x, y) =
+            lab_ab_to_graph_xy(point.lab, min_a, max_a, min_b, max_b, width, height, margin);
+        let radius = if point.weight >= 64.0 {
+            2
+        } else if point.weight >= 8.0 {
+            1
+        } else {
+            0
+        };
+        let alpha = (48.0 + point.weight.sqrt() * 18.0).min(180.0) as u8;
+        let color = debug
+            .palette_colors
+            .get(*assignment)
+            .copied()
+            .unwrap_or(point.rgb);
+        draw_debug_disc(
+            &mut image,
+            x,
+            y,
+            radius,
+            [color[0], color[1], color[2], alpha],
+        );
+    }
+
+    for (center, color) in debug.centers.iter().zip(&debug.palette_colors) {
+        let (x, y) = lab_ab_to_graph_xy(*center, min_a, max_a, min_b, max_b, width, height, margin);
+        draw_debug_cluster_marker(&mut image, x, y, *color);
+    }
+
+    image
+}
+
+fn debug_cluster_graph_render_scale(width: u32, height: u32) -> u32 {
+    DEBUG_CLUSTER_GRAPH_RENDER_SCALE
+        .min(width)
+        .min(height)
+        .max(1)
+}
+
+fn debug_graph_margin(width: u32, height: u32) -> u32 {
+    let max_margin = width.min(height).saturating_sub(1) / 2;
+    if max_margin == 0 {
+        return 0;
+    }
+    (width.min(height) / 16).clamp(2, 10).min(max_margin)
+}
+
+fn palette_cluster_lab_bounds(debug: &PaletteDebugInfo) -> (f64, f64, f64, f64) {
+    let mut min_a = f64::INFINITY;
+    let mut max_a = f64::NEG_INFINITY;
+    let mut min_b = f64::INFINITY;
+    let mut max_b = f64::NEG_INFINITY;
+
+    for lab in debug
+        .points
+        .iter()
+        .map(|point| point.lab)
+        .chain(debug.centers.iter().copied())
+    {
+        min_a = min_a.min(lab[1]);
+        max_a = max_a.max(lab[1]);
+        min_b = min_b.min(lab[2]);
+        max_b = max_b.max(lab[2]);
+    }
+
+    if !min_a.is_finite() || !min_b.is_finite() {
+        return (-1.0, 1.0, -1.0, 1.0);
+    }
+    let a_padding = ((max_a - min_a) * 0.08).max(2.0);
+    let b_padding = ((max_b - min_b) * 0.08).max(2.0);
+    (
+        min_a - a_padding,
+        max_a + a_padding,
+        min_b - b_padding,
+        max_b + b_padding,
+    )
+}
+
+fn lab_ab_to_graph_xy(
+    lab: [f64; 3],
+    min_a: f64,
+    max_a: f64,
+    min_b: f64,
+    max_b: f64,
+    width: u32,
+    height: u32,
+    margin: u32,
+) -> (i32, i32) {
+    let plot_width = (width - margin * 2 - 1) as f64;
+    let plot_height = (height - margin * 2 - 1) as f64;
+    let x = margin as f64 + ((lab[1] - min_a) / (max_a - min_a).max(1.0)) * plot_width;
+    let y =
+        (height - margin - 1) as f64 - ((lab[2] - min_b) / (max_b - min_b).max(1.0)) * plot_height;
+    (x.round() as i32, y.round() as i32)
+}
+
+fn draw_debug_disc(image: &mut RawImage, cx: i32, cy: i32, radius: i32, color: [u8; 4]) {
+    for y in cy - radius..=cy + radius {
+        for x in cx - radius..=cx + radius {
+            if x < 0 || y < 0 || x >= image.width as i32 || y >= image.height as i32 {
+                continue;
+            }
+            if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= radius * radius {
+                blend_debug_pixel(image, x as u32, y as u32, color);
+            }
+        }
+    }
+}
+
+fn draw_debug_cluster_marker(image: &mut RawImage, cx: i32, cy: i32, rgb: [u8; 3]) {
+    for offset in -3..=3 {
+        draw_debug_marker_pixel(image, cx + offset, cy, [20, 20, 20, 255]);
+        draw_debug_marker_pixel(image, cx, cy + offset, [20, 20, 20, 255]);
+    }
+    for offset in -2..=2 {
+        draw_debug_marker_pixel(image, cx + offset, cy, [rgb[0], rgb[1], rgb[2], 255]);
+        draw_debug_marker_pixel(image, cx, cy + offset, [rgb[0], rgb[1], rgb[2], 255]);
+    }
+}
+
+fn draw_debug_marker_pixel(image: &mut RawImage, x: i32, y: i32, color: [u8; 4]) {
+    if x < 0 || y < 0 || x >= image.width as i32 || y >= image.height as i32 {
+        return;
+    }
+    image.set_pixel(x as u32, y as u32, color);
 }
 
 fn compose_debug_rows(rows: &[&[RawImage]]) -> RawImage {
@@ -4043,6 +4235,7 @@ mod tests {
             ),
             &mesh,
             &[[255, 0, 0], [0, 255, 0]],
+            None,
             DebugSheetOptions {
                 debug_scale: 1,
                 palette_merge_threshold: 1.0,
@@ -4118,6 +4311,33 @@ mod tests {
 
         assert!(palette.width <= 240 * 36 / 100);
         assert!(palette.height <= 160 * 24 / 100);
+    }
+
+    #[test]
+    fn debug_palette_cluster_graph_matches_requested_panel_size() {
+        let debug = PaletteDebugInfo {
+            clustering: crate::core::PaletteClustering::Spatial,
+            points: vec![
+                crate::palette::PaletteDebugPoint {
+                    rgb: [255, 0, 0],
+                    lab: [54.0, 80.0, 67.0],
+                    weight: 128.0,
+                },
+                crate::palette::PaletteDebugPoint {
+                    rgb: [0, 0, 255],
+                    lab: [32.0, 79.0, -108.0],
+                    weight: 64.0,
+                },
+            ],
+            assignments: vec![0, 1],
+            palette_colors: vec![[255, 0, 0], [0, 0, 255]],
+            centers: vec![[54.0, 80.0, 67.0], [32.0, 79.0, -108.0]],
+        };
+
+        let graph = create_debug_palette_cluster_graph(&debug, 640, 480);
+
+        assert_eq!((graph.width, graph.height), (640, 480));
+        assert_eq!(debug_cluster_graph_render_scale(640, 480), 6);
     }
 
     #[test]

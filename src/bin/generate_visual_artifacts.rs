@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use serde::Deserialize;
 
 use fixpix::core::{
-    ArtifactOptions, ColorMode, DownscaleSampleFrom, OutputFormat, PaletteStrategy,
-    PixelWidthDetector, Size, TransformOptions, transform_bytes, write_image_file,
+    ArtifactOptions, ColorMode, DownscaleSampleFrom, OutputFormat, PaletteClustering,
+    PaletteStrategy, PixelWidthDetector, Size, TransformOptions, transform_bytes, write_image_file,
 };
 use fixpix::threading;
 
@@ -55,6 +55,7 @@ struct ManifestOptions {
     palette_merge_threshold: Option<f32>,
     color_sample_grid_size: Option<u32>,
     palette_strategy: Option<String>,
+    palette_clustering: Option<String>,
     scale: Option<u32>,
     auto_scale_target: Option<ManifestSize>,
     downscale: Option<ManifestSize>,
@@ -308,6 +309,13 @@ fn manifest_options_to_transform(options: &ManifestOptions) -> Result<TransformO
             "global" => PaletteStrategy::Global,
             "sampled" => PaletteStrategy::Sampled,
             _ => bail!("unsupported palette strategy: {value}"),
+        };
+    }
+    if let Some(value) = &options.palette_clustering {
+        transform.palette_clustering = match value.as_str() {
+            "regular" => PaletteClustering::Regular,
+            "spatial" => PaletteClustering::Spatial,
+            _ => bail!("unsupported palette clustering: {value}"),
         };
     }
     transform.scale = options.scale;

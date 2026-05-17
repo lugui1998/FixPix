@@ -66,6 +66,12 @@ Use Hough-only pixel-width detection:
 fixpix ./input.png --pixel-width-detector hough
 ```
 
+Print transform metadata as JSON:
+
+```bash
+fixpix ./input.png --metadata
+```
+
 Force a known source pixel width:
 
 ```bash
@@ -112,6 +118,7 @@ fixpix ./input.png --pixel-width 8
 | `--unscaled-out <path>` | path | none | Writes the unscaled cleaned sprite before final output scaling. |
 | `--palette-out <path>` | path | none | Writes a palette swatch image. |
 | `--palette-scale <n>` | positive integer | `6` | Scale used for the palette swatch artifact. |
+| `--metadata` | flag | `false` | Prints transform metadata as JSON to stdout instead of output paths. |
 | `-h, --help` | flag | `false` | Prints command help. |
 
 ## Pixel-Width Detectors
@@ -142,35 +149,6 @@ fixpix ./input-dir ./output-dir --jobs 16
 The same thread pool is used for batch work and per-image CPU work.
 
 ## Release Builds
-
-### Windows
-
-```powershell
-cargo build --release --target x86_64-pc-windows-msvc --bin fixpix
-```
-
-The repository config enables static CRT for the MSVC target.
-
-### Linux
-
-Native Linux release build:
-
-```bash
-cargo build --release --bin fixpix
-```
-
-For a more self-contained Linux binary, build for musl:
-
-```bash
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl --bin fixpix
-```
-
-When cross-compiling from Windows, musl may require a C toolchain such as
-`x86_64-linux-musl-gcc`. Building from Linux or WSL with the musl toolchain
-installed is the recommended path.
-
-From WSL:
 
 ```bash
 cargo build --release --bin fixpix

@@ -5,11 +5,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rayon::prelude::*;
+use serde::Serialize;
 
 use crate::core::{
     ArtifactOptions, ColorMode, DEFAULT_EDGE_CLOSE_KERNEL_SIZE, DEFAULT_MIN_INPUT_HEIGHT,
     DEFAULT_MIN_INPUT_WIDTH, DownscaleSampleFrom, OutputFormat, PaletteStrategy,
-    PixelWidthDetector, Size, TransformOptions, transform_bytes, write_image_file,
+    PixelWidthDetector, PixelWidthSource, Size, TransformOptions, TransformResult, transform_bytes,
+    write_image_file,
 };
 use crate::mesh::{DEFAULT_WARP_SUBDIVISION_DEPTH, DEFAULT_WARP_SUBDIVISION_EDGE_THRESHOLD};
 use crate::threading;
@@ -104,6 +106,11 @@ pub struct CliArgs {
     pub palette_out: Option<PathBuf>,
     #[arg(long = "palette-scale", default_value = "6")]
     pub palette_scale: u32,
+    #[arg(
+        long = "metadata",
+        help = "Print transform metadata as JSON to stdout instead of output paths"
+    )]
+    pub metadata: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -135,9 +142,52 @@ pub enum CliExecutionResult {
     },
 }
 
+#[derive(Debug)]
+struct CliExecutionReport {
+    result: CliExecutionResult,
+    metadata: CliMetadataOutput,
+}
+
+#[derive(Debug)]
+enum CliMetadataOutput {
+    File(CliImageMetadata),
+    Batch(Vec<CliImageMetadata>),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CliImageMetadata {
+    pub input: String,
+    pub output_path: String,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub unscaled_width: u32,
+    pub unscaled_height: u32,
+    pub detected_pixel_width: u32,
+    pub detection_scale_used: u32,
+    pub resolved_colors: Option<usize>,
+    pub edge_close_kernel_size: u32,
+    pub palette_color_count: usize,
+    pub pixel_width_source: &'static str,
+    pub artifacts: CliArtifactMetadata,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CliArtifactMetadata {
+    pub palette_path: Option<String>,
+    pub unscaled_path: Option<String>,
+    pub debug_sheet_path: Option<String>,
+}
+
 pub fn run_from_env() -> Result<()> {
     let args = CliArgs::parse();
-    match execute(args)? {
+    let print_metadata = args.metadata;
+    let report = execute_with_metadata(args)?;
+    if print_metadata {
+        print_metadata_output(&report.metadata)?;
+        return Ok(());
+    }
+
+    match report.result {
         CliExecutionResult::File(path) => {
             println!("{}", path.display());
         }
@@ -151,6 +201,10 @@ pub fn run_from_env() -> Result<()> {
 }
 
 pub fn execute(args: CliArgs) -> Result<CliExecutionResult> {
+    Ok(execute_with_metadata(args)?.result)
+}
+
+fn execute_with_metadata(args: CliArgs) -> Result<CliExecutionReport> {
     let parsed = parse_cli(args)?;
     let threads = threading::configure_global_pool(parsed.jobs);
     if let Some(input_path) = &parsed.input_path
@@ -168,7 +222,7 @@ pub fn execute(args: CliArgs) -> Result<CliExecutionResult> {
                 input_path.display()
             );
         }
-        let mut outputs = inputs
+        let mut transformed = inputs
             .par_iter()
             .map(|input| {
                 let output = resolve_batch_file_output_path(
@@ -178,14 +232,18 @@ pub fn execute(args: CliArgs) -> Result<CliExecutionResult> {
                     parsed.transform.format,
                 );
                 let options = create_batch_transform_options(&parsed.transform, input_path, input);
-                run_one_file(input, &output, &options, &parsed.network)?;
-                Ok(output)
+                let metadata = run_one_file(input, &output, &options, &parsed.network)?;
+                Ok((output, metadata))
             })
             .collect::<Result<Vec<_>>>()?;
-        outputs.sort();
-        return Ok(CliExecutionResult::Batch {
-            outputs,
-            job_count: parsed.jobs.unwrap_or(threads).min(inputs.len()).max(1),
+        transformed.sort_by(|left, right| left.0.cmp(&right.0));
+        let (outputs, metadata): (Vec<_>, Vec<_>) = transformed.into_iter().unzip();
+        return Ok(CliExecutionReport {
+            result: CliExecutionResult::Batch {
+                outputs,
+                job_count: parsed.jobs.unwrap_or(threads).min(inputs.len()).max(1),
+            },
+            metadata: CliMetadataOutput::Batch(metadata),
         });
     }
 
@@ -204,7 +262,11 @@ pub fn execute(args: CliArgs) -> Result<CliExecutionResult> {
         parsed.transform.format,
         parsed.transform.quality,
     )?;
-    Ok(CliExecutionResult::File(parsed.output_path))
+    let metadata = create_cli_image_metadata(&parsed.input, &parsed.output_path, &result);
+    Ok(CliExecutionReport {
+        result: CliExecutionResult::File(parsed.output_path),
+        metadata: CliMetadataOutput::File(metadata),
+    })
 }
 
 pub fn parse_cli(args: CliArgs) -> Result<ParsedCli> {
@@ -313,10 +375,74 @@ fn run_one_file(
     output: &Path,
     options: &TransformOptions,
     network: &NetworkOptions,
-) -> Result<()> {
+) -> Result<CliImageMetadata> {
     let bytes = load_input(&input.to_string_lossy(), network)?;
     let result = transform_bytes(&bytes, options)?;
-    write_image_file(&result.output, output, options.format, options.quality)
+    write_image_file(&result.output, output, options.format, options.quality)?;
+    Ok(create_cli_image_metadata(
+        &input.display().to_string(),
+        output,
+        &result,
+    ))
+}
+
+fn print_metadata_output(metadata: &CliMetadataOutput) -> Result<()> {
+    match metadata {
+        CliMetadataOutput::File(metadata) => {
+            println!("{}", serde_json::to_string_pretty(metadata)?);
+        }
+        CliMetadataOutput::Batch(metadata) => {
+            println!("{}", serde_json::to_string_pretty(metadata)?);
+        }
+    }
+    Ok(())
+}
+
+fn create_cli_image_metadata(
+    input: &str,
+    output: &Path,
+    result: &TransformResult,
+) -> CliImageMetadata {
+    CliImageMetadata {
+        input: input.to_string(),
+        output_path: path_to_string(output),
+        output_width: result.output.width,
+        output_height: result.output.height,
+        unscaled_width: result.unscaled.width,
+        unscaled_height: result.unscaled.height,
+        detected_pixel_width: result.detected_pixel_width,
+        detection_scale_used: result.scale_used,
+        resolved_colors: result.resolved_colors,
+        edge_close_kernel_size: result.metadata.edge_close_kernel_size,
+        palette_color_count: result.metadata.palette_color_count,
+        pixel_width_source: pixel_width_source_name(result.metadata.pixel_width_source),
+        artifacts: CliArtifactMetadata {
+            palette_path: result.artifacts.palette_path.as_deref().map(path_to_string),
+            unscaled_path: result
+                .artifacts
+                .unscaled_path
+                .as_deref()
+                .map(path_to_string),
+            debug_sheet_path: result
+                .artifacts
+                .debug_sheet_path
+                .as_deref()
+                .map(path_to_string),
+        },
+    }
+}
+
+fn pixel_width_source_name(source: PixelWidthSource) -> &'static str {
+    match source {
+        PixelWidthSource::Manual => "manual",
+        PixelWidthSource::Projection => "projection",
+        PixelWidthSource::Hybrid => "hybrid",
+        PixelWidthSource::Hough => "hough",
+    }
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.display().to_string()
 }
 
 fn create_batch_transform_options(

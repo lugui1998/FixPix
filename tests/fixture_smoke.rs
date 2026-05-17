@@ -93,6 +93,42 @@ fn single_file_execution_writes_output_and_debug_artifact() {
 }
 
 #[test]
+fn metadata_flag_prints_transform_metadata_as_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = fixture_path("fish.png");
+    let output_path = temp.path().join("fish.png");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fixpix"))
+        .arg(&input)
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--metadata")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists());
+
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let input_string = input.display().to_string();
+    let output_string = output_path.display().to_string();
+    assert_eq!(metadata["input"].as_str(), Some(input_string.as_str()));
+    assert_eq!(
+        metadata["output_path"].as_str(),
+        Some(output_string.as_str())
+    );
+    assert!(metadata["output_width"].as_u64().unwrap() > 0);
+    assert!(metadata["output_height"].as_u64().unwrap() > 0);
+    assert!(metadata["detected_pixel_width"].as_u64().unwrap() >= 1);
+    assert!(metadata["palette_color_count"].as_u64().unwrap() > 0);
+    assert!(metadata["pixel_width_source"].as_str().is_some());
+}
+
+#[test]
 fn url_execution_downloads_image_and_writes_output() {
     threading::configure_global_pool(Some(2));
     let temp = tempfile::tempdir().unwrap();

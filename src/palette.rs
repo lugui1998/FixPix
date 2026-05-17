@@ -1822,11 +1822,87 @@ fn spatial_quantized_palette_from_centers(
         })
         .collect();
 
-    SpatialQuantizedPalette {
-        palette,
-        centers: centers.to_vec(),
-        assignments,
+    dedupe_spatial_quantized_palette(
+        points,
+        SpatialQuantizedPalette {
+            palette,
+            centers: centers.to_vec(),
+            assignments,
+        },
+    )
+}
+
+fn dedupe_spatial_quantized_palette(
+    points: &[SpatialColorPoint],
+    mut quantized: SpatialQuantizedPalette,
+) -> SpatialQuantizedPalette {
+    if quantized.palette.len() <= 1 {
+        return quantized;
     }
+
+    let mut color_indices = HashMap::<u32, usize>::new();
+    let mut old_to_new = vec![0; quantized.palette.len()];
+    let mut palette = Vec::<[u8; 3]>::new();
+    for (old_index, color) in quantized.palette.iter().copied().enumerate() {
+        let new_index = *color_indices.entry(pack_rgb(color)).or_insert_with(|| {
+            palette.push(color);
+            palette.len() - 1
+        });
+        old_to_new[old_index] = new_index;
+    }
+
+    if palette.len() == quantized.palette.len() {
+        return quantized;
+    }
+
+    for assignment in &mut quantized.assignments {
+        if let Some(new_index) = old_to_new.get(*assignment).copied() {
+            *assignment = new_index;
+        }
+    }
+
+    quantized.palette = palette;
+    quantized.centers = merged_spatial_centers_from_assignments(
+        points,
+        &quantized.assignments,
+        quantized.palette.len(),
+    );
+    quantized
+}
+
+fn merged_spatial_centers_from_assignments(
+    points: &[SpatialColorPoint],
+    assignments: &[usize],
+    center_count: usize,
+) -> Vec<[f64; 5]> {
+    let mut sums = vec![[0.0; 5]; center_count];
+    let mut weights = vec![0.0; center_count];
+    for (point, assignment) in points.iter().zip(assignments.iter().copied()) {
+        if assignment >= center_count {
+            continue;
+        }
+        let features = spatial_point_features(point);
+        for channel in 0..5 {
+            sums[assignment][channel] += features[channel] * point.weight;
+        }
+        weights[assignment] += point.weight;
+    }
+
+    sums.into_iter()
+        .zip(weights)
+        .map(|(sum, weight)| {
+            if weight <= 0.0 {
+                return [0.0; 5];
+            }
+            [
+                sum[0] / weight,
+                sum[1] / weight,
+                sum[2] / weight,
+                sum[3] / weight,
+                sum[4] / weight,
+            ]
+        })
+        .collect()
 }
 
 fn nearest_spatial_center_index(features: [f64; 5], centers: &[[f64; 5]]) -> usize {
@@ -2022,6 +2098,27 @@ mod tests {
     }
 
     #[test]
+    fn spatial_palette_merges_duplicate_resolved_colors() {
+        let red = [255, 0, 0];
+        let blue = [0, 0, 255];
+        let points = vec![
+            test_spatial_point(red, 0.0, 0.0),
+            test_spatial_point(red, 1.0, 0.0),
+            test_spatial_point(blue, 0.5, 0.0),
+        ];
+        let centers = points
+            .iter()
+            .map(spatial_point_features)
+            .collect::<Vec<_>>();
+
+        let quantized = spatial_quantized_palette_from_centers(&points, &centers);
+
+        assert_eq!(quantized.palette, vec![red, blue]);
+        assert_eq!(quantized.assignments, vec![0, 0, 1]);
+        assert_eq!(quantized.centers.len(), quantized.palette.len());
+    }
+
+    #[test]
     fn samples_center_pixel_when_grid_size_is_one() {
         let image = RawImage::new(3, 1, vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
         assert_eq!(sample_cell_color(&image, 0, 3, 0, 1, 1), [0, 255, 0, 255]);
@@ -2160,5 +2257,15 @@ mod tests {
             detection.offset_y,
         );
         crate::mesh::sample_cells(&image, &mesh, 5, false)
+    }
+
+    fn test_spatial_point(rgb: [u8; 3], x: f64, y: f64) -> SpatialColorPoint {
+        SpatialColorPoint {
+            rgb,
+            lab: rgb_to_lab(rgb),
+            x,
+            y,
+            weight: 1.0,
+        }
     }
 }

@@ -2897,10 +2897,11 @@ pub fn create_debug_sheet_with_options(
         mask_row.push(preview);
     }
 
-    let mut output_row = vec![final_preview, palette_preview];
+    let mut output_row = vec![final_preview];
     if let Some(preview) = cluster_preview {
         output_row.push(preview);
     }
+    output_row.push(palette_preview);
     let mut rows = vec![top_row.as_slice()];
     if !mask_row.is_empty() {
         rows.push(mask_row.as_slice());

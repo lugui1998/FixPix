@@ -139,7 +139,7 @@ impl Default for TransformOptions {
             palette_merge_threshold: 1.0,
             color_sample_grid_size: 5,
             palette_strategy: PaletteStrategy::Global,
-            palette_clustering: PaletteClustering::Spatial,
+            palette_clustering: PaletteClustering::Regular,
             scale: None,
             auto_scale_target: None,
             downscale: None,

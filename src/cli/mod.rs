@@ -48,7 +48,7 @@ pub struct CliArgs {
     pub color_sample_grid_size: u32,
     #[arg(long = "palette-strategy", default_value = "global")]
     pub palette_strategy: String,
-    #[arg(long = "palette-clustering", default_value = "spatial")]
+    #[arg(long = "palette-clustering", default_value = "regular")]
     pub palette_clustering: String,
     #[arg(short = 's', long = "scale")]
     pub scale: Option<u32>,
@@ -858,6 +858,22 @@ mod tests {
     #[test]
     fn parses_default_colors_as_auto() {
         let args = base_args("tests/sources/fish.png");
+        let parsed = parse_cli(args).unwrap();
+        assert_eq!(parsed.transform.colors, ColorMode::Auto);
+        assert_eq!(
+            parsed.transform.palette_clustering,
+            PaletteClustering::Regular
+        );
+    }
+
+    #[test]
+    fn parses_spatial_palette_clustering() {
+        let args = CliArgs::parse_from([
+            "fixpix",
+            "tests/sources/fish.png",
+            "--palette-clustering",
+            "spatial",
+        ]);
         let parsed = parse_cli(args).unwrap();
         assert_eq!(parsed.transform.colors, ColorMode::Auto);
         assert_eq!(

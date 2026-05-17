@@ -92,7 +92,7 @@ fixpix ./input.png --pixel-width 8
 | `--palette-merge-threshold <n>` | number | `1` | Color-only merge threshold used by regular palette selection. `0` keeps more exact color distinctions. |
 | `--color-sample-grid-size <n>` | positive integer | `5` | Cell sampling control. `1` samples only the center; values above `1` use dominant cell color sampling. |
 | `--palette-strategy <global\|sampled>` | enum | `global` | `global` builds the palette from image-wide color stats. `sampled` builds it from sampled cell colors. |
-| `--palette-clustering <spatial\|regular>` | enum | `spatial` | `spatial` clusters with color and image position so similar distant regions can stay separate. `regular` uses color-only clustering. |
+| `--palette-clustering <regular\|spatial>` | enum | `regular` | `regular` uses color-only clustering. `spatial` clusters with color and image position so similar distant regions can stay separate. |
 | `-s, --scale <n>` | positive integer | automatic | Final integer output scale. Overrides automatic scale selection. |
 | `--auto-scale-width <n>` | positive integer | none | Target width for automatic output scaling. Must be used with `--auto-scale-height`. |
 | `--auto-scale-height <n>` | positive integer | none | Target height for automatic output scaling. Must be used with `--auto-scale-width`. |
@@ -166,7 +166,8 @@ cargo test
 ```
 
 `cargo test` also regenerates the default visual inspection outputs under
-`rust/output/`.
+`output/`, including the spatial clustering comparison in
+`output/spatial-clustering/`.
 
 Run the benchmark smoke test:
 

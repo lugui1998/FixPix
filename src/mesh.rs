@@ -17,6 +17,9 @@ const DEBUG_PALETTE_MAX_SWATCH_SCALE: u32 = 64;
 const DEBUG_PALETTE_MAX_WIDTH_RATIO: f32 = 0.36;
 const DEBUG_PALETTE_MAX_HEIGHT_RATIO: f32 = 0.24;
 const DEBUG_CLUSTER_GRAPH_RENDER_SCALE: u32 = 6;
+const DEBUG_CLUSTER_POINT_RADIUS_LIGHT: i32 = 1;
+const DEBUG_CLUSTER_POINT_RADIUS_MEDIUM: i32 = 2;
+const DEBUG_CLUSTER_POINT_RADIUS_HEAVY: i32 = 3;
 const DEBUG_GRID_COLOR: [u8; 4] = [255, 0, 0, 255];
 const DEBUG_UNWARPED_GRID_COLOR: [u8; 4] = [80, 200, 255, 255];
 const DEBUG_UNUSED_WARPED_GRID_COLOR: [u8; 4] = [255, 80, 220, 120];
@@ -3122,13 +3125,7 @@ fn render_debug_palette_cluster_graph(
     for (point, assignment) in debug.points.iter().zip(&debug.assignments) {
         let (x, y) =
             lab_ab_to_graph_xy(point.lab, min_a, max_a, min_b, max_b, width, height, margin);
-        let radius = if point.weight >= 64.0 {
-            2
-        } else if point.weight >= 8.0 {
-            1
-        } else {
-            0
-        };
+        let radius = debug_cluster_point_radius(point.weight);
         let alpha = (48.0 + point.weight.sqrt() * 18.0).min(180.0) as u8;
         let color = debug
             .palette_colors
@@ -3150,6 +3147,16 @@ fn render_debug_palette_cluster_graph(
     }
 
     image
+}
+
+fn debug_cluster_point_radius(weight: f64) -> i32 {
+    if weight >= 64.0 {
+        DEBUG_CLUSTER_POINT_RADIUS_HEAVY
+    } else if weight >= 8.0 {
+        DEBUG_CLUSTER_POINT_RADIUS_MEDIUM
+    } else {
+        DEBUG_CLUSTER_POINT_RADIUS_LIGHT
+    }
 }
 
 fn debug_cluster_graph_render_scale(width: u32, height: u32) -> u32 {
@@ -4339,6 +4346,13 @@ mod tests {
 
         assert_eq!((graph.width, graph.height), (640, 480));
         assert_eq!(debug_cluster_graph_render_scale(640, 480), 6);
+    }
+
+    #[test]
+    fn debug_palette_cluster_points_use_readable_radii() {
+        assert_eq!(debug_cluster_point_radius(1.0), 1);
+        assert_eq!(debug_cluster_point_radius(8.0), 2);
+        assert_eq!(debug_cluster_point_radius(64.0), 3);
     }
 
     #[test]

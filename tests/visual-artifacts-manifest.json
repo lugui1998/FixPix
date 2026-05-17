@@ -1,6 +1,7 @@
 {
   "defaultCategories": [
     "default",
+    "spatial-clustering",
     "text-clarity",
     "transparency",
     "transparent-32x32"
@@ -15,6 +16,20 @@
         {
           "name": "default",
           "options": {}
+        }
+      ]
+    },
+    {
+      "name": "spatial-clustering",
+      "description": "Spatial palette clustering for every source fixture.",
+      "outputDir": "spatial-clustering",
+      "fixtures": "all",
+      "scenarios": [
+        {
+          "name": "spatial-clustering",
+          "options": {
+            "paletteClustering": "spatial"
+          }
         }
       ]
     },

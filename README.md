@@ -96,7 +96,7 @@ fixpix ./input.png --pixel-width 8
 | `-s, --scale <n>` | positive integer | automatic | Final integer output scale. Overrides automatic scale selection. |
 | `--auto-scale-width <n>` | positive integer | none | Target width for automatic output scaling. Must be used with `--auto-scale-height`. |
 | `--auto-scale-height <n>` | positive integer | none | Target height for automatic output scaling. Must be used with `--auto-scale-width`. |
-| `--downscale <n\|WxH>` | positive integer or size | none | Removes detected boundary background, crops transparent padding, and fits the source into the requested size before pixel processing. A single number means square size. |
+| `--downscale <n\|WxH>` | positive integer or size | none | Fits the source into the requested size before pixel processing. With `--transparent`, first removes detected boundary background and crops transparent padding. A single number means square size. |
 | `--downscale-sample-from <pixelated\|original>` | enum | `pixelated` | `pixelated` keeps the resized downscale result. `original` samples dominant colors from the cleaned original image. |
 | `-t, --transparent` | flag | `false` | Masks detected boundary-connected background before sampling and removes adjacent sampled background fringes. |
 | `--edge-close-kernel-size <n>` | `0` or odd integer | `3` | Closes the detected edge mask before using it as a transparency flood-fill barrier and in debug edge previews. `0` disables closing. |

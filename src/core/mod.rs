@@ -271,13 +271,17 @@ struct PreparedImage {
 
 fn prepare_image(decoded: RawImage, options: &TransformOptions) -> Result<PreparedImage> {
     if let Some(size) = options.downscale {
-        let transparent = make_boundary_background_transparent_with_edge_closing(
-            &decoded,
-            options.edge_close_kernel_size,
-        );
-        let cropped = crop_transparent_padding(&clear_fully_transparent_pixels(&transparent));
+        let source = if options.transparent_background {
+            let transparent = make_boundary_background_transparent_with_edge_closing(
+                &decoded,
+                options.edge_close_kernel_size,
+            );
+            crop_transparent_padding(&clear_fully_transparent_pixels(&transparent))
+        } else {
+            decoded
+        };
         let resized = clear_fully_transparent_pixels(&downscale_ignoring_transparent(
-            &cropped,
+            &source,
             size.width,
             size.height,
         ));
@@ -290,13 +294,13 @@ fn prepare_image(decoded: RawImage, options: &TransformOptions) -> Result<Prepar
             debug_anchor_lines_x: None,
             debug_anchor_lines_y: None,
         };
-        let debug_mesh = create_downscaled_source_mesh_result(&cropped, size.width, size.height);
+        let debug_mesh = create_downscaled_source_mesh_result(&source, size.width, size.height);
         return Ok(PreparedImage {
             decoded: resized,
-            debug_image: Some(cropped.clone()),
+            debug_image: Some(source.clone()),
             mesh,
             debug_mesh,
-            downscale_source: Some(cropped),
+            downscale_source: Some(source),
         });
     }
 
@@ -680,6 +684,51 @@ mod tests {
         );
         assert_eq!(mesh.mesh.lines_y, vec![0, 10, 20, 30, 40, 50]);
         assert_eq!(mesh.detected_pixel_width, 10);
+    }
+
+    fn bordered_subject_image() -> RawImage {
+        let white = [255, 255, 255, 255];
+        let red = [255, 0, 0, 255];
+        let mut image = RawImage::new(4, 4, white.repeat(16));
+        for y in 1..=2 {
+            for x in 1..=2 {
+                image.set_pixel(x, y, red);
+            }
+        }
+        image
+    }
+
+    #[test]
+    fn downscale_preserves_boundary_background_without_transparent_flag() {
+        let options = TransformOptions {
+            downscale: Some(Size {
+                width: 2,
+                height: 2,
+            }),
+            ..TransformOptions::default()
+        };
+
+        let prepared = prepare_image(bordered_subject_image(), &options).unwrap();
+
+        assert_eq!((prepared.decoded.width, prepared.decoded.height), (2, 2));
+        assert_eq!(prepared.decoded.pixel(0, 0), [255, 191, 191, 255]);
+    }
+
+    #[test]
+    fn downscale_removes_boundary_background_with_transparent_flag() {
+        let options = TransformOptions {
+            downscale: Some(Size {
+                width: 2,
+                height: 2,
+            }),
+            transparent_background: true,
+            ..TransformOptions::default()
+        };
+
+        let prepared = prepare_image(bordered_subject_image(), &options).unwrap();
+
+        assert_eq!((prepared.decoded.width, prepared.decoded.height), (2, 2));
+        assert_eq!(prepared.decoded.pixel(0, 0), [255, 0, 0, 255]);
     }
 
     #[test]

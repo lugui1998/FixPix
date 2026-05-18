@@ -1199,9 +1199,8 @@ fn plateau_auto_count(evaluations: &[AutoClusterEvaluation]) -> Option<usize> {
             (previous.mean_distance_sq - current.mean_distance_sq) / previous.mean_distance_sq;
         (previous.count >= 8
             && improvement.is_finite()
-            && improvement >= 0.0
-            && improvement < AUTO_PLATEAU_RELATIVE_IMPROVEMENT)
-            .then_some(previous.count)
+            && (0.0..AUTO_PLATEAU_RELATIVE_IMPROVEMENT).contains(&improvement))
+        .then_some(previous.count)
     })
 }
 
@@ -1222,8 +1221,8 @@ fn pick_knee_auto_count(evaluations: &[AutoClusterEvaluation]) -> Option<usize> 
     evaluations
         .iter()
         .max_by(|left, right| {
-            let left_score = auto_knee_score(*left, min_count, max_count, min_error, max_error);
-            let right_score = auto_knee_score(*right, min_count, max_count, min_error, max_error);
+            let left_score = auto_knee_score(left, min_count, max_count, min_error, max_error);
+            let right_score = auto_knee_score(right, min_count, max_count, min_error, max_error);
             left_score.total_cmp(&right_score)
         })
         .map(|evaluation| evaluation.count)

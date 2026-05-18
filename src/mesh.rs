@@ -3121,10 +3121,9 @@ fn render_debug_palette_cluster_graph(
         [190, 190, 190, 255],
     );
 
-    let (min_a, max_a, min_b, max_b) = palette_cluster_lab_bounds(debug);
+    let bounds = palette_cluster_lab_bounds(debug);
     for (point, assignment) in debug.points.iter().zip(&debug.assignments) {
-        let (x, y) =
-            lab_ab_to_graph_xy(point.lab, min_a, max_a, min_b, max_b, width, height, margin);
+        let (x, y) = lab_ab_to_graph_xy(point.lab, &bounds, width, height, margin);
         let radius = debug_cluster_point_radius(point.weight);
         let alpha = (48.0 + point.weight.sqrt() * 18.0).min(180.0) as u8;
         let color = debug
@@ -3142,7 +3141,7 @@ fn render_debug_palette_cluster_graph(
     }
 
     for (center, color) in debug.centers.iter().zip(&debug.palette_colors) {
-        let (x, y) = lab_ab_to_graph_xy(*center, min_a, max_a, min_b, max_b, width, height, margin);
+        let (x, y) = lab_ab_to_graph_xy(*center, &bounds, width, height, margin);
         draw_debug_cluster_marker(&mut image, x, y, *color);
     }
 
@@ -3174,7 +3173,14 @@ fn debug_graph_margin(width: u32, height: u32) -> u32 {
     (width.min(height) / 16).clamp(2, 10).min(max_margin)
 }
 
-fn palette_cluster_lab_bounds(debug: &PaletteDebugInfo) -> (f64, f64, f64, f64) {
+struct LabGraphBounds {
+    min_a: f64,
+    max_a: f64,
+    min_b: f64,
+    max_b: f64,
+}
+
+fn palette_cluster_lab_bounds(debug: &PaletteDebugInfo) -> LabGraphBounds {
     let mut min_a = f64::INFINITY;
     let mut max_a = f64::NEG_INFINITY;
     let mut min_b = f64::INFINITY;
@@ -3193,33 +3199,36 @@ fn palette_cluster_lab_bounds(debug: &PaletteDebugInfo) -> (f64, f64, f64, f64) 
     }
 
     if !min_a.is_finite() || !min_b.is_finite() {
-        return (-1.0, 1.0, -1.0, 1.0);
+        return LabGraphBounds {
+            min_a: -1.0,
+            max_a: 1.0,
+            min_b: -1.0,
+            max_b: 1.0,
+        };
     }
     let a_padding = ((max_a - min_a) * 0.08).max(2.0);
     let b_padding = ((max_b - min_b) * 0.08).max(2.0);
-    (
-        min_a - a_padding,
-        max_a + a_padding,
-        min_b - b_padding,
-        max_b + b_padding,
-    )
+    LabGraphBounds {
+        min_a: min_a - a_padding,
+        max_a: max_a + a_padding,
+        min_b: min_b - b_padding,
+        max_b: max_b + b_padding,
+    }
 }
 
 fn lab_ab_to_graph_xy(
     lab: [f64; 3],
-    min_a: f64,
-    max_a: f64,
-    min_b: f64,
-    max_b: f64,
+    bounds: &LabGraphBounds,
     width: u32,
     height: u32,
     margin: u32,
 ) -> (i32, i32) {
     let plot_width = (width - margin * 2 - 1) as f64;
     let plot_height = (height - margin * 2 - 1) as f64;
-    let x = margin as f64 + ((lab[1] - min_a) / (max_a - min_a).max(1.0)) * plot_width;
-    let y =
-        (height - margin - 1) as f64 - ((lab[2] - min_b) / (max_b - min_b).max(1.0)) * plot_height;
+    let x = margin as f64
+        + ((lab[1] - bounds.min_a) / (bounds.max_a - bounds.min_a).max(1.0)) * plot_width;
+    let y = (height - margin - 1) as f64
+        - ((lab[2] - bounds.min_b) / (bounds.max_b - bounds.min_b).max(1.0)) * plot_height;
     (x.round() as i32, y.round() as i32)
 }
 

@@ -4,7 +4,7 @@
     "spatial-clustering",
     "text-clarity",
     "transparency",
-    "transparent-32x32"
+    "downsample-32x32"
   ],
   "categories": [
     {
@@ -75,12 +75,9 @@
       ]
     },
     {
-      "name": "transparent-32x32",
-      "aliases": [
-        "transparency-32x32"
-      ],
-      "description": "Transparent-background cleanup followed by 32x32 downscale.",
-      "outputDir": "transparent-32x32",
+      "name": "downsample-32x32",
+      "description": "32x32 downsample coverage with and without transparent-background cleanup.",
+      "outputDir": "downsample-32x32",
       "fixtures": [
         "armor2.png",
         "armor3.png",
@@ -92,9 +89,22 @@
       ],
       "scenarios": [
         {
-          "name": "transparent-32x32",
+          "name": "transparent",
           "options": {
             "transparentBackground": true,
+            "scale": 32,
+            "downscale": {
+              "width": 32,
+              "height": 32
+            }
+          }
+        },
+        {
+          "name": "opaque",
+          "fixtures": [
+            "dragon_zoom.png"
+          ],
+          "options": {
             "scale": 32,
             "downscale": {
               "width": 32,

@@ -45,6 +45,8 @@ enum FixtureSelection {
 struct Scenario {
     name: String,
     #[serde(default)]
+    fixtures: Option<FixtureSelection>,
+    #[serde(default)]
     options: ManifestOptions,
 }
 
@@ -224,18 +226,29 @@ fn build_jobs(categories: &[Category], fixtures: &[Fixture]) -> Result<Vec<Rende
         .filter(|items| !items.is_empty() && items[0] != "all");
     let mut jobs = Vec::new();
     for category in categories {
-        for fixture in fixtures_for_category(category, fixtures)? {
-            if let Some(filter) = &fixture_filter
-                && !filter
-                    .iter()
-                    .any(|name| name == &fixture.name || name == &fixture.file)
-            {
-                continue;
-            }
-            for scenario in &category.scenarios {
+        let category_fixtures =
+            fixtures_for_selection(&category.fixtures, fixtures, &category.name)?;
+        for scenario in &category.scenarios {
+            let scenario_fixtures = if let Some(selection) = &scenario.fixtures {
+                fixtures_for_selection(
+                    selection,
+                    fixtures,
+                    &format!("{}/{}", category.name, scenario.name),
+                )?
+            } else {
+                category_fixtures.clone()
+            };
+            for fixture in scenario_fixtures {
+                if let Some(filter) = &fixture_filter
+                    && !filter
+                        .iter()
+                        .any(|name| name == &fixture.name || name == &fixture.file)
+                {
+                    continue;
+                }
                 jobs.push(RenderJob {
                     category: category.clone(),
-                    fixture: fixture.clone(),
+                    fixture,
                     scenario: scenario.clone(),
                 });
             }
@@ -244,8 +257,12 @@ fn build_jobs(categories: &[Category], fixtures: &[Fixture]) -> Result<Vec<Rende
     Ok(jobs)
 }
 
-fn fixtures_for_category(category: &Category, fixtures: &[Fixture]) -> Result<Vec<Fixture>> {
-    match &category.fixtures {
+fn fixtures_for_selection(
+    selection: &FixtureSelection,
+    fixtures: &[Fixture],
+    owner: &str,
+) -> Result<Vec<Fixture>> {
+    match selection {
         FixtureSelection::All(value) if value == "all" => Ok(fixtures.to_vec()),
         FixtureSelection::All(value) => bail!("unsupported fixture selector: {value}"),
         FixtureSelection::Files(files) => files
@@ -255,7 +272,7 @@ fn fixtures_for_category(category: &Category, fixtures: &[Fixture]) -> Result<Ve
                     .iter()
                     .find(|fixture| fixture.file == *file || fixture.name == *file)
                     .cloned()
-                    .with_context(|| format!("unknown fixture in {}: {file}", category.name))
+                    .with_context(|| format!("unknown fixture in {owner}: {file}"))
             })
             .collect(),
     }

@@ -41,17 +41,22 @@ fn cargo_test_generates_default_visual_artifacts() {
             .and_then(Value::as_array)
             .expect("category scenarios must be an array")
             .len();
-        let fixture_count = fixture_count_for_category(category, source_count);
-        let expected = fixture_count * scenario_count * GENERATED_FILES_PER_RENDER;
+        let render_count = render_count_for_category(category, source_count);
+        let expected = render_count * GENERATED_FILES_PER_RENDER;
         let actual = wait_for_file_count(manifest_dir().join("output").join(output_dir), expected);
 
         assert_eq!(
             actual, expected,
             "{category_name} should generate every scaled, unscaled, and debug artifact"
         );
+        assert!(
+            scenario_count > 0,
+            "{category_name} should define at least one scenario"
+        );
     }
 
     assert_text_clarity_artifacts_exist();
+    assert_downsample_32x32_artifacts_exist();
 }
 
 fn read_manifest() -> Value {
@@ -88,11 +93,29 @@ fn category_by_name<'a>(manifest: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing visual category: {name}"))
 }
 
-fn fixture_count_for_category(category: &Value, source_count: usize) -> usize {
-    match category
-        .get("fixtures")
-        .expect("category fixtures must exist")
-    {
+fn render_count_for_category(category: &Value, source_count: usize) -> usize {
+    let category_fixture_count = fixture_count_for_selector(
+        category
+            .get("fixtures")
+            .expect("category fixtures must exist"),
+        source_count,
+    );
+    category
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .expect("category scenarios must be an array")
+        .iter()
+        .map(|scenario| {
+            scenario
+                .get("fixtures")
+                .map(|fixtures| fixture_count_for_selector(fixtures, source_count))
+                .unwrap_or(category_fixture_count)
+        })
+        .sum()
+}
+
+fn fixture_count_for_selector(selector: &Value, source_count: usize) -> usize {
+    match selector {
         Value::String(value) if value == "all" => source_count,
         Value::Array(files) => files.len(),
         value => panic!("unsupported fixture selector: {value:?}"),
@@ -141,6 +164,20 @@ fn assert_text_clarity_artifacts_exist() {
             assert!(
                 path.exists(),
                 "text clarity fixture should generate {}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn assert_downsample_32x32_artifacts_exist() {
+    let output_dir = manifest_dir().join("output").join("downsample-32x32");
+    for scenario in ["transparent", "opaque"] {
+        for suffix in ["scaled", "unscaled", "debug"] {
+            let path = output_dir.join(format!("dragon_zoom-{scenario}-{suffix}.png"));
+            assert!(
+                path.exists(),
+                "dragon zoom downsample fixture should generate {}",
                 path.display()
             );
         }
